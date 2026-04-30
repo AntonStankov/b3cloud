@@ -1,0 +1,19 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+  - qemu-guest-agent
+
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: '0644'
+    content: |
+      token: "${token}"
+      node-label:
+        - "nodepool=${nodepool}"
+        - "arch=${arch}"
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - NODE_IP=$(ip -4 route get 1.1.1.1 | awk '{print $7; exit}')
+  - curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${server_ip}:6443" K3S_TOKEN="${token}" INSTALL_K3S_EXEC="agent --node-ip=$${NODE_IP}" sh -

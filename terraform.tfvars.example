@@ -1,0 +1,48 @@
+# Hetzner Cloud
+hcloud_token   = "REPLACE_WITH_HCLOUD_API_TOKEN"
+name_prefix    = "paas"
+location       = "fsn1"
+k3s_version    = "v1.30.3+k3s1"
+ssh_public_key = "ssh-ed25519 AAAA... your-key-comment"
+
+# Worker pool autoscaling bounds
+cpx_min_nodes = 1
+cpx_max_nodes = 20
+cax_min_nodes = 1
+cax_max_nodes = 20
+
+# Build engine credentials
+# GitHub PAT is required for private repos used by kpack source builds.
+github_pat = "REPLACE_WITH_GITHUB_PAT"
+
+# Private container registry (target for built app images)
+registry_server   = "registry.example.com"
+registry_username = "REPLACE_WITH_REGISTRY_USERNAME"
+registry_password = "REPLACE_WITH_REGISTRY_PASSWORD_OR_TOKEN"
+
+# App domain base (used by ingress hostnames)
+cluster_domain = "apps.example.com"
+
+# Cloudflare Zero Trust + DNS automation
+cloudflare_api_token    = "REPLACE_WITH_CLOUDFLARE_API_TOKEN"
+cloudflare_zone_id      = "REPLACE_WITH_CLOUDFLARE_ZONE_ID"
+cloudflare_tunnel_id    = "REPLACE_WITH_CLOUDFLARE_TUNNEL_ID"
+cloudflare_tunnel_token = "REPLACE_WITH_CLOUDFLARE_TUNNEL_TOKEN"
+
+# Optional: deploy admin/user APIs on separate Hetzner projects.
+# Use project-scoped tokens from each Hetzner project.
+deploy_separate_api_projects = true
+hcloud_admin_project_token   = "REPLACE_WITH_ADMIN_PROJECT_HCLOUD_TOKEN"
+hcloud_user_project_token    = "REPLACE_WITH_USER_PROJECT_HCLOUD_TOKEN"
+api_server_type              = "cpx22"
+
+# Optional Cloudflare hostnames for API VMs.
+admin_api_domain = "admin-api.example.com"
+user_api_domain  = "api.example.com"
+
+# Kubernetes provider
+# Path to kubeconfig that Terraform will use after control-plane is up.
+kubeconfig_path = "./kubeconfig"
+
+# Zero Trust-only mode: keep false unless you explicitly want in-cluster ACME certs.
+enable_cert_manager = false

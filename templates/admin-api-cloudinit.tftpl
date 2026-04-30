@@ -1,0 +1,40 @@
+#cloud-config
+package_update: true
+packages:
+  - python3-pip
+
+runcmd:
+  - mkdir -p /opt/b3cloud
+  - |
+    cat > /opt/b3cloud/admin_api.py <<'PY'
+    from fastapi import FastAPI
+
+    app = FastAPI(title="B3Cloud Admin API", version="1.0.0")
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "api": "admin"}
+
+    @app.get("/whoami")
+    def whoami():
+        return {"role": "admin", "project": "b3"}
+    PY
+  - python3 -m pip install --upgrade pip fastapi uvicorn
+  - |
+    cat > /etc/systemd/system/b3-admin-api.service <<'SERVICE'
+    [Unit]
+    Description=B3Cloud Admin API
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    WorkingDirectory=/opt/b3cloud
+    ExecStart=/usr/bin/python3 -m uvicorn admin_api:app --host 0.0.0.0 --port 9000
+    Restart=always
+    RestartSec=3
+
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+  - systemctl daemon-reload
+  - systemctl enable --now b3-admin-api

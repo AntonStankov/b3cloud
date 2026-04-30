@@ -1,0 +1,28 @@
+#cloud-config
+package_update: true
+packages:
+  - curl
+  - qemu-guest-agent
+
+write_files:
+  - path: /etc/rancher/k3s/config.yaml
+    permissions: '0644'
+    content: |
+      token: "${token}"
+      tls-san:
+        - "${server_ip}"
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - |
+    if [ "${cluster_init}" = "true" ]; then
+      NODE_IP=$(ip -4 route get 1.1.1.1 | awk '{print $7; exit}')
+      curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" INSTALL_K3S_EXEC="server --cluster-init --node-ip=$${NODE_IP} --advertise-address=$${NODE_IP}" sh -
+    else
+      NODE_IP=$(ip -4 route get 1.1.1.1 | awk '{print $7; exit}')
+      curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${server_ip}:6443" INSTALL_K3S_EXEC="server --node-ip=$${NODE_IP} --advertise-address=$${NODE_IP}" sh -
+    fi
+  - mkdir -p /root/.kube
+  - cp /etc/rancher/k3s/k3s.yaml /root/.kube/config
+  - chown root:root /root/.kube/config
+  - sed -i "s/127.0.0.1/${server_ip}/g" /root/.kube/config

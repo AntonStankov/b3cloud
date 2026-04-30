@@ -1,0 +1,138 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kpack
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-basic-auth
+  namespace: kpack
+stringData:
+  username: git
+  password: "<GITHUB_PERSONAL_ACCESS_TOKEN>"
+type: kubernetes.io/basic-auth
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registry-creds
+  namespace: kpack
+type: kubernetes.io/dockerconfigjson
+stringData:
+  .dockerconfigjson: |
+    {
+      "auths": {
+        "<REGISTRY_SERVER>": {
+          "username": "<REGISTRY_USERNAME>",
+          "password": "<REGISTRY_PASSWORD>",
+          "auth": "<BASE64_USER_PASS>"
+        }
+      }
+    }
+---
+apiVersion: kpack.io/v1alpha2
+kind: ClusterStore
+metadata:
+  name: platform-store
+spec:
+  sources:
+  - image: gcr.io/paketo-buildpacks/nodejs:latest
+  - image: gcr.io/paketo-buildpacks/python:latest
+  - image: gcr.io/paketo-buildpacks/go:latest
+  - image: gcr.io/paketo-buildpacks/procfile:latest
+  - image: gcr.io/paketo-buildpacks/nginx:latest
+---
+apiVersion: kpack.io/v1alpha2
+kind: ClusterStack
+metadata:
+  name: platform-base-stack
+spec:
+  id: "io.buildpacks.stacks.jammy"
+  buildImage:
+    image: paketobuildpacks/build-jammy-base:latest
+  runImage:
+    image: paketobuildpacks/run-jammy-base:latest
+---
+apiVersion: kpack.io/v1alpha2
+kind: Builder
+metadata:
+  name: platform-builder
+  namespace: kpack
+spec:
+  serviceAccountName: kpack-builder-sa
+  tag: "<REGISTRY_SERVER>/platform/builders/platform-builder:latest"
+  stack:
+    name: platform-base-stack
+    kind: ClusterStack
+  store:
+    name: platform-store
+    kind: ClusterStore
+  order:
+  - group:
+    - id: paketo-buildpacks/nodejs
+  - group:
+    - id: paketo-buildpacks/python
+  - group:
+    - id: paketo-buildpacks/go
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kpack-builder-sa
+  namespace: kpack
+secrets:
+- name: github-basic-auth
+imagePullSecrets:
+- name: registry-creds
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: app-quota
+  namespace: default
+spec:
+  hard:
+    pods: "20"
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    services: "20"
+    persistentvolumeclaims: "10"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: app-limits
+  namespace: default
+spec:
+  limits:
+  - type: Container
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    max:
+      cpu: "2"
+      memory: "4Gi"
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: platform-ops@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx

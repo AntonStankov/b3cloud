@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>B3Cloud Control Room</title>
+    <link rel="stylesheet" href="/admin-ui/app.css?v=20260430b">
+  </head>
+  <body>
+    <div class="backdrop"></div>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">B3Cloud Platform</p>
+          <h1>Control Room</h1>
+          <p class="hero-copy">Operate the cluster, run Terraform, reconcile infrastructure, and manage deployments from one place.</p>
+        </div>
+        <section class="token-panel card">
+          <label for="admin-token">Admin Token</label>
+          <div class="token-row">
+            <input id="admin-token" type="password" placeholder="Paste X-Admin-Token">
+            <button id="save-token" class="accent">Save</button>
+          </div>
+          <p id="token-state" class="muted">Token is kept in this browser only.</p>
+        </section>
+      </header>
+
+      <section class="overview-grid">
+        <article class="stat card">
+          <span class="stat-label">API Health</span>
+          <strong id="health-status">Unknown</strong>
+          <span id="health-detail" class="muted">Run refresh.</span>
+        </article>
+        <article class="stat card">
+          <span class="stat-label">Nodes</span>
+          <strong id="node-count">0</strong>
+          <span class="muted">Cluster members</span>
+        </article>
+        <article class="stat card">
+          <span class="stat-label">Deployments</span>
+          <strong id="deployment-count">0</strong>
+          <span class="muted">Across all namespaces</span>
+        </article>
+        <article class="stat card">
+          <span class="stat-label">Monitoring</span>
+          <strong id="monitoring-host">Unknown</strong>
+          <a id="monitoring-link" class="link-button" href="#" target="_blank" rel="noreferrer">Open Grafana</a>
+        </article>
+      </section>
+
+      <section class="toolbar card">
+        <div class="toolbar-copy">
+          <h2>Live Refresh</h2>
+          <p>Refresh health, nodes, deployments, and pods from the admin API.</p>
+        </div>
+        <div class="toolbar-actions">
+          <input id="pods-namespace" type="text" placeholder="Pods namespace, blank = all">
+          <button id="refresh-all" class="accent">Refresh All</button>
+        </div>
+      </section>
+
+      <section class="layout-grid">
+        <article class="card">
+          <div class="section-head">
+            <h2>Cluster Nodes</h2>
+            <button id="refresh-nodes" class="ghost">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Ready</th>
+                  <th>Arch</th>
+                  <th>Internal IP</th>
+                  <th>External IP</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-table"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Deployments</h2>
+            <button id="refresh-deployments" class="ghost">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Namespace</th>
+                  <th>Name</th>
+                  <th>Ready</th>
+                  <th>Available</th>
+                  <th>Replicas</th>
+                </tr>
+              </thead>
+              <tbody id="deployments-table"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="layout-grid">
+        <article class="card">
+          <div class="section-head">
+            <h2>Pods</h2>
+            <button id="refresh-pods" class="ghost">Refresh</button>
+          </div>
+          <div class="table-wrap pods-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Namespace</th>
+                  <th>Name</th>
+                  <th>Phase</th>
+                  <th>Node</th>
+                  <th>Pod IP</th>
+                </tr>
+              </thead>
+              <tbody id="pods-table"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card stack">
+          <div class="section-head">
+            <h2>Infrastructure</h2>
+          </div>
+
+          <div class="action-box">
+            <h3>Reconcile Platform</h3>
+            <p>Apply the monitoring and wildcard DNS targets, then sync the Cloudflare monitoring route.</p>
+            <div class="form-grid compact">
+              <label>
+                Monitoring Host
+                <input id="reconcile-hostname" type="text" placeholder="monitoring.example.com">
+              </label>
+            </div>
+            <button id="run-reconcile" class="accent">Run Reconcile</button>
+          </div>
+
+          <div class="action-box">
+            <h3>Terraform</h3>
+            <div class="form-grid compact">
+              <label>
+                Targets
+                <textarea id="terraform-targets" rows="4" placeholder="helm_release.monitoring&#10;cloudflare_record.apps_wildcard"></textarea>
+              </label>
+            </div>
+            <div class="button-row">
+              <button id="terraform-init" class="ghost">Init</button>
+              <button id="terraform-plan" class="ghost">Plan</button>
+              <button id="terraform-apply" class="accent">Apply</button>
+              <button id="terraform-output" class="ghost">Output</button>
+            </div>
+          </div>
+
+          <div class="action-box">
+            <h3>DNS Route</h3>
+            <div class="form-grid compact">
+              <label>
+                Hostname
+                <input id="dns-hostname" type="text" placeholder="app.example.com">
+              </label>
+            </div>
+            <button id="create-dns-route" class="ghost">Configure Route</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="layout-grid">
+        <article class="card">
+          <div class="section-head">
+            <h2>Create Deployment</h2>
+          </div>
+          <form id="deployment-form" class="form-grid">
+            <label>
+              GitHub URL
+              <input name="github_url" type="url" placeholder="https://github.com/org/repo">
+            </label>
+            <label>
+              Namespace
+              <input name="namespace" type="text" placeholder="tenant-a">
+            </label>
+            <label>
+              App Name
+              <input name="app_name" type="text" placeholder="frontend">
+            </label>
+            <label>
+              Target Host
+              <input name="target_host" type="text" placeholder="frontend.example.com">
+            </label>
+            <label>
+              Registry Repo
+              <input name="registry_repo" type="text" placeholder="docker.io/user">
+            </label>
+            <label>
+              Git Revision
+              <input name="git_revision" type="text" value="main">
+            </label>
+            <label>
+              Port
+              <input name="port" type="number" value="8080">
+            </label>
+            <label>
+              Node Arch
+              <select name="node_arch">
+                <option value="">Any</option>
+                <option value="amd64">amd64</option>
+                <option value="arm64">arm64</option>
+              </select>
+            </label>
+            <label class="wide">
+              Environment JSON
+              <textarea name="env" rows="5" placeholder='{"KEY":"value"}'></textarea>
+            </label>
+            <div class="resource-grid wide">
+              <label>
+                CPU Request
+                <input name="cpu_request" type="text" value="100m">
+              </label>
+              <label>
+                CPU Limit
+                <input name="cpu_limit" type="text" value="500m">
+              </label>
+              <label>
+                Memory Request
+                <input name="memory_request" type="text" value="128Mi">
+              </label>
+              <label>
+                Memory Limit
+                <input name="memory_limit" type="text" value="512Mi">
+              </label>
+            </div>
+            <button type="submit" class="accent wide">Create Deployment</button>
+          </form>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Console</h2>
+            <button id="clear-console" class="ghost">Clear</button>
+          </div>
+          <pre id="console-output" class="console">B3Cloud control room ready.</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/admin-ui/app.js?v=20260430b"></script>
+  </body>
+</html>

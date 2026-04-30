@@ -1,0 +1,15 @@
+.codex
+.terraform/
+__pycache__/
+generated/
+
+*.pyc
+*.pyo
+*.pyd
+
+kubeconfig
+terraform.tfvars
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfstate.*.backup
+tfplan

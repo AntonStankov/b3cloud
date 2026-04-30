@@ -1,0 +1,56 @@
+#cloud-config
+package_update: true
+packages:
+  - python3-pip
+
+runcmd:
+  - mkdir -p /opt/b3cloud
+  - |
+    cat > /opt/b3cloud/user_api.py <<'PY'
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+
+    app = FastAPI(title="B3Cloud User API", version="1.0.0")
+
+    class DeploymentRequest(BaseModel):
+        app_name: str
+        github_url: str
+        domain: str
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok", "api": "user"}
+
+    @app.get("/whoami")
+    def whoami():
+        return {"role": "user", "project": "b3"}
+
+    @app.post("/deployments/request")
+    def request_deployment(payload: DeploymentRequest):
+        return {
+            "status": "accepted",
+            "app_name": payload.app_name,
+            "github_url": payload.github_url,
+            "domain": payload.domain,
+            "message": "Request accepted by user API. Wire this endpoint to platform_core for full deployment orchestration."
+        }
+    PY
+  - python3 -m pip install --upgrade pip fastapi uvicorn pydantic
+  - |
+    cat > /etc/systemd/system/b3-user-api.service <<'SERVICE'
+    [Unit]
+    Description=B3Cloud User API
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    WorkingDirectory=/opt/b3cloud
+    ExecStart=/usr/bin/python3 -m uvicorn user_api:app --host 0.0.0.0 --port 9001
+    Restart=always
+    RestartSec=3
+
+    [Install]
+    WantedBy=multi-user.target
+    SERVICE
+  - systemctl daemon-reload
+  - systemctl enable --now b3-user-api
