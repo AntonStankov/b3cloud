@@ -4,6 +4,57 @@
 
 The admin API manages B3Cloud app lifecycle, cluster inspection, Cloudflare routes, and Terraform actions.
 
+## Infrastructure Automation
+
+For a fresh rebuild from this repository, run:
+
+```bash
+./scripts/bootstrap_b3_infra.sh
+```
+
+That script:
+
+- runs Terraform for the Hetzner servers, network, and API VM
+- fetches the K3s kubeconfig from the control plane
+- runs the full Terraform platform apply
+- deploys the real admin/user APIs and UIs to the API VM
+- syncs the public Cloudflare Zero Trust hostnames
+
+The API VM runtime is installed by:
+
+```bash
+./scripts/install_b3_api_runtime.sh
+```
+
+You normally do not run that directly. It is used by `deploy_admin_ui.sh`, the bootstrap script, and GitHub Actions.
+
+### Main Branch Updates
+
+The workflow at `.github/workflows/deploy-b3-infrastructure.yml` redeploys the B3 API services on every push to `main`.
+
+Required GitHub repository secrets:
+
+- `B3_API_HOST`
+- `B3_API_SSH_PRIVATE_KEY`
+- `B3_API_SSH_USER` optional, defaults to `root`
+- `B3_ADMIN_DOMAIN`
+- `B3_USER_DOMAIN`
+- `B3_MONITORING_DOMAIN`
+- `B3_ADMIN_TOKEN`
+- `B3_USER_API_KEY`
+- `B3_CLUSTER_DOMAIN`
+- `B3_GITHUB_PAT`
+- `B3_REGISTRY_SERVER`
+- `B3_REGISTRY_USERNAME`
+- `B3_REGISTRY_NAMESPACE`
+- `B3_REGISTRY_PASSWORD`
+- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_ZONE_ID`
+- `CLOUDFLARE_TUNNEL_ID`
+- `CLOUDFLARE_ACCOUNT_ID`
+
+Deployed tenant applications are intentionally not Terraform resources. They are created by the user API and should be redeployed through the user UI/API after a cluster rebuild.
+
 ### Install
 
 ```bash

@@ -16,9 +16,9 @@ cax_max_nodes = 20
 github_pat = "REPLACE_WITH_GITHUB_PAT"
 
 # Private container registry (target for built app images)
-registry_server   = "registry.example.com"
-registry_username = "REPLACE_WITH_REGISTRY_USERNAME"
-registry_password = "REPLACE_WITH_REGISTRY_PASSWORD_OR_TOKEN"
+registry_server   = "ghcr.io"
+registry_username = "REPLACE_WITH_GITHUB_USERNAME_OR_ORG"
+registry_password = "REPLACE_WITH_GHCR_PAT"
 
 # App domain base (used by ingress hostnames)
 cluster_domain = "apps.example.com"

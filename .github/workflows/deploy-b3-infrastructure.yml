@@ -1,0 +1,117 @@
+name: Deploy B3 infrastructure services
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy-api-services:
+    runs-on: ubuntu-latest
+    env:
+      REMOTE_HOST: ${{ secrets.B3_API_HOST }}
+      REMOTE_USER: ${{ secrets.B3_API_SSH_USER || 'root' }}
+      ADMIN_DOMAIN: ${{ secrets.B3_ADMIN_DOMAIN }}
+      USER_DOMAIN: ${{ secrets.B3_USER_DOMAIN }}
+      MONITORING_DOMAIN: ${{ secrets.B3_MONITORING_DOMAIN }}
+      ADMIN_TOKEN: ${{ secrets.B3_ADMIN_TOKEN }}
+      USER_API_KEY: ${{ secrets.B3_USER_API_KEY }}
+      CLUSTER_DOMAIN: ${{ secrets.B3_CLUSTER_DOMAIN }}
+      GITHUB_PAT: ${{ secrets.B3_GITHUB_PAT }}
+      REGISTRY_SERVER: ${{ secrets.B3_REGISTRY_SERVER }}
+      REGISTRY_USERNAME: ${{ secrets.B3_REGISTRY_USERNAME }}
+      REGISTRY_NAMESPACE: ${{ secrets.B3_REGISTRY_NAMESPACE }}
+      REGISTRY_PASSWORD: ${{ secrets.B3_REGISTRY_PASSWORD }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      CLOUDFLARE_TUNNEL_ID: ${{ secrets.CLOUDFLARE_TUNNEL_ID }}
+      CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            REMOTE_HOST ADMIN_DOMAIN USER_DOMAIN MONITORING_DOMAIN
+            ADMIN_TOKEN USER_API_KEY CLUSTER_DOMAIN GITHUB_PAT
+            REGISTRY_SERVER REGISTRY_USERNAME REGISTRY_NAMESPACE REGISTRY_PASSWORD
+            CLOUDFLARE_API_TOKEN CLOUDFLARE_ZONE_ID CLOUDFLARE_TUNNEL_ID CF_ACCOUNT_ID
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required secret/env: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Prepare SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.B3_API_SSH_PRIVATE_KEY }}" > ~/.ssh/b3_api_key
+          chmod 600 ~/.ssh/b3_api_key
+          ssh-keyscan -H "$REMOTE_HOST" >> ~/.ssh/known_hosts
+
+      - name: Package B3 service code
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf /tmp/b3cloud-services.tgz \
+            admin_api.py \
+            user_api.py \
+            platform_core.py \
+            README.md \
+            scripts \
+            templates \
+            admin_ui \
+            user_ui \
+            infrastructure.tf \
+            kpack-configuration.yaml
+
+      - name: Deploy API VM runtime and services
+        shell: bash
+        run: |
+          set -euo pipefail
+          scp -i ~/.ssh/b3_api_key /tmp/b3cloud-services.tgz "$REMOTE_USER@$REMOTE_HOST:/root/b3cloud-services.tgz"
+          ssh -i ~/.ssh/b3_api_key "$REMOTE_USER@$REMOTE_HOST" \
+            ADMIN_DOMAIN="$ADMIN_DOMAIN" \
+            USER_DOMAIN="$USER_DOMAIN" \
+            ADMIN_TOKEN="$ADMIN_TOKEN" \
+            USER_API_KEY="$USER_API_KEY" \
+            CLUSTER_DOMAIN="$CLUSTER_DOMAIN" \
+            GITHUB_PAT="$GITHUB_PAT" \
+            REGISTRY_SERVER="$REGISTRY_SERVER" \
+            REGISTRY_USERNAME="$REGISTRY_USERNAME" \
+            REGISTRY_NAMESPACE="$REGISTRY_NAMESPACE" \
+            REGISTRY_PASSWORD="$REGISTRY_PASSWORD" \
+            CLOUDFLARE_API_TOKEN="$CLOUDFLARE_API_TOKEN" \
+            CLOUDFLARE_ZONE_ID="$CLOUDFLARE_ZONE_ID" \
+            CLOUDFLARE_TUNNEL_ID="$CLOUDFLARE_TUNNEL_ID" \
+            CF_ACCOUNT_ID="$CF_ACCOUNT_ID" \
+            'bash -s' <<'REMOTE'
+          set -euo pipefail
+          mkdir -p /opt/b3cloud
+          tar -xzf /root/b3cloud-services.tgz -C /opt/b3cloud
+          bash /opt/b3cloud/scripts/install_b3_api_runtime.sh
+          REMOTE
+
+      - name: Sync Cloudflare public routes
+        shell: bash
+        env:
+          ADMIN_ORIGIN: http://${{ secrets.B3_API_HOST }}
+          USER_ORIGIN: http://${{ secrets.B3_API_HOST }}
+        run: |
+          set -euo pipefail
+          python scripts/sync_cloudflare_routes.py
+
+      - name: Verify public endpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS "https://$USER_DOMAIN/health"
+          curl -fsS "https://$ADMIN_DOMAIN/health"

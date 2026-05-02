@@ -5,10 +5,20 @@ This API is intended for tenant usage and exposes a restricted subset of actions
 
 from __future__ import annotations
 
+import json
 import os
-from typing import Dict, Optional
+import re
+import threading
+import time
+import traceback
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 
 from platform_core import DeploymentRequest, PlatformCore, ResourceLimits, sanitize_name
@@ -23,10 +33,6 @@ class ResourceLimitsIn(BaseModel):
 
 class AppDeployIn(BaseModel):
     github_url: str
-    domain: str
-    app_name: str
-    namespace: str
-    registry_repo: str
     env: Dict[str, str] = Field(default_factory=dict)
     git_revision: str = "main"
     port: int = 8080
@@ -38,7 +44,12 @@ class UserApi:
     def __init__(self) -> None:
         self.api_key = os.getenv("B3CLOUD_USER_API_KEY", "")
         kubeconfig = os.getenv("B3CLOUD_KUBECONFIG", "./kubeconfig")
+        self.cluster_domain = os.getenv("B3CLOUD_CLUSTER_DOMAIN", "")
+        self.registry_server = os.getenv("B3CLOUD_REGISTRY_SERVER", "")
+        self.registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
+        self.registry_namespace = os.getenv("B3CLOUD_REGISTRY_NAMESPACE", self.registry_username.lower())
         self.core = PlatformCore(kubeconfig=kubeconfig)
+        self.jobs = DeployJobStore()
 
     def auth(self, x_api_key: Optional[str]) -> None:
         if not self.api_key:
@@ -46,19 +57,132 @@ class UserApi:
         if x_api_key != self.api_key:
             raise HTTPException(status_code=401, detail="Unauthorized")
 
+    def defaults_from_github_url(self, github_url: str) -> Dict[str, str]:
+        if not self.cluster_domain:
+            raise HTTPException(status_code=500, detail="Server misconfigured: B3CLOUD_CLUSTER_DOMAIN is not set")
+        if not self.registry_server or not self.registry_username:
+            raise HTTPException(
+                status_code=500,
+                detail="Server misconfigured: B3CLOUD_REGISTRY_SERVER or B3CLOUD_REGISTRY_USERNAME is not set",
+            )
 
-svc = UserApi()
-app = FastAPI(title="B3Cloud User API", version="1.0.0")
+        repo_name = repo_name_from_github_url(github_url)
+        safe_name = sanitize_name(repo_name)
+        return {
+            "repo_name": repo_name,
+            "app_name": safe_name,
+            "namespace": safe_name,
+            "domain": f"{safe_name}.{self.cluster_domain}",
+            "registry_repo": f"{self.registry_server}/{self.registry_namespace}",
+        }
 
 
-@app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def repo_name_from_github_url(github_url: str) -> str:
+    normalized = github_url.rstrip("/")
+    match = re.search(r"/([^/]+?)(?:\.git)?$", normalized)
+    if not match:
+        raise HTTPException(status_code=400, detail=f"Unsupported github_url format: {github_url}")
+    return match.group(1)
 
 
-@app.post("/apps/deploy")
-def deploy_app(payload: AppDeployIn, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, str]:
-    svc.auth(x_api_key)
+class DeployJobStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs_path = Path(__file__).with_name("data") / "user_deploy_jobs.json"
+        self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
+        self._jobs: Dict[str, Dict[str, object]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self._jobs_path.exists():
+            return
+        try:
+            payload = json.loads(self._jobs_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(payload, dict):
+            self._jobs = payload
+
+    def _persist(self) -> None:
+        self._jobs_path.write_text(json.dumps(self._jobs, indent=2, sort_keys=True))
+
+    def create_job(self, payload: AppDeployIn, defaults: Dict[str, str]) -> Dict[str, object]:
+        with self._lock:
+            now = _now()
+            job_id = uuid.uuid4().hex
+            job = {
+                "job_id": job_id,
+                "status": "queued",
+                "created_at": now,
+                "updated_at": now,
+                "github_url": payload.github_url,
+                "git_revision": payload.git_revision,
+                "namespace": defaults["namespace"],
+                "app_name": defaults["app_name"],
+                "domain": defaults["domain"],
+                "registry_repo": defaults["registry_repo"],
+                "logs": ["Job queued."],
+                "result": None,
+                "error": None,
+            }
+            self._jobs[job_id] = job
+            self._trim()
+            self._persist()
+            return dict(job)
+
+    def append_log(self, job_id: str, message: str) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            logs = list(job.get("logs", []))
+            logs.append(message)
+            job["logs"] = logs[-300:]
+            job["updated_at"] = _now()
+            self._persist()
+
+    def set_status(self, job_id: str, status: str) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            job["status"] = status
+            job["updated_at"] = _now()
+            self._persist()
+
+    def set_result(self, job_id: str, result: Dict[str, object]) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            job["result"] = result
+            job["status"] = "succeeded"
+            job["updated_at"] = _now()
+            self._persist()
+
+    def set_error(self, job_id: str, error_message: str) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            job["error"] = error_message
+            job["status"] = "failed"
+            job["updated_at"] = _now()
+            self._persist()
+
+    def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return dict(job) if job else None
+
+    def list_jobs(self) -> List[Dict[str, object]]:
+        with self._lock:
+            jobs = [dict(job) for job in self._jobs.values()]
+        jobs.sort(key=lambda job: str(job.get("created_at", "")), reverse=True)
+        return jobs
+
+    def _trim(self) -> None:
+        if len(self._jobs) <= 100:
+            return
+        ordered = sorted(self._jobs.items(), key=lambda item: str(item[1].get("created_at", "")), reverse=True)
+        self._jobs = dict(ordered[:100])
+
+
+def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str]) -> None:
+    svc.jobs.set_status(job_id, "running")
+    svc.jobs.append_log(job_id, "Deploy job started.")
     req = DeploymentRequest(
         github_url=payload.github_url,
         env=payload.env,
@@ -68,28 +192,134 @@ def deploy_app(payload: AppDeployIn, x_api_key: Optional[str] = Header(default=N
             memory_request=payload.resources.memory_request,
             memory_limit=payload.resources.memory_limit,
         ),
-        namespace=sanitize_name(payload.namespace),
-        app_name=sanitize_name(payload.app_name),
-        target_host=payload.domain,
-        registry_repo=payload.registry_repo,
+        namespace=defaults["namespace"],
+        app_name=defaults["app_name"],
+        target_host=defaults["domain"],
+        registry_repo=defaults["registry_repo"],
         git_revision=payload.git_revision,
         port=payload.port,
         node_arch=payload.node_arch,
     )
     try:
-        return svc.core.new_deployment(req)
+        result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
+        result.update(
+            {
+                "repo_name": defaults["repo_name"],
+                "namespace": defaults["namespace"],
+                "app_name": defaults["app_name"],
+                "domain": defaults["domain"],
+                "registry_repo": defaults["registry_repo"],
+            }
+        )
+        svc.jobs.append_log(job_id, "Deploy job finished successfully.")
+        svc.jobs.set_result(job_id, result)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        svc.jobs.append_log(job_id, f"Deploy job failed: {exc}")
+        trace = traceback.format_exc()
+        svc.jobs.append_log(job_id, trace.strip())
+        svc.jobs.set_error(job_id, str(exc))
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+svc = UserApi()
+app = FastAPI(title="B3Cloud User API", version="1.0.0")
+UI_DIR = os.path.join(os.path.dirname(__file__), "user_ui")
+
+if os.path.isdir(UI_DIR):
+    app.mount("/user-ui", StaticFiles(directory=UI_DIR), name="user-ui")
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/")
+def user_frontend() -> FileResponse:
+    index_path = os.path.join(UI_DIR, "index.html")
+    if not os.path.exists(index_path):
+        raise HTTPException(status_code=404, detail="User UI is not installed")
+    return FileResponse(index_path)
+
+
+@app.get("/apps")
+def list_apps(
+    namespace: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, str]]:
+    svc.auth(x_api_key)
+    deployments = (
+        svc.core.apps.list_namespaced_deployment(namespace).items
+        if namespace
+        else svc.core.apps.list_deployment_for_all_namespaces().items
+    )
+
+    out: List[Dict[str, str]] = []
+    for dep in deployments:
+        image = dep.spec.template.spec.containers[0].image if dep.spec.template.spec.containers else ""
+        out.append(
+            {
+                "namespace": dep.metadata.namespace,
+                "app_name": dep.metadata.name,
+                "replicas": str(dep.spec.replicas or 0),
+                "ready_replicas": str(dep.status.ready_replicas or 0),
+                "image": image,
+            }
+        )
+    return out
+
+
+@app.post("/apps/deploy")
+def deploy_app(payload: AppDeployIn, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    svc.auth(x_api_key)
+    defaults = svc.defaults_from_github_url(payload.github_url)
+    job = svc.jobs.create_job(payload, defaults)
+    threading.Thread(
+        target=_run_deploy_job,
+        args=(job["job_id"], payload, defaults),
+        daemon=True,
+        name=f"deploy-job-{job['job_id']}",
+    ).start()
+    return job
+
+
+@app.get("/deploy-jobs")
+def list_deploy_jobs(x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
+    svc.auth(x_api_key)
+    return svc.jobs.list_jobs()
+
+
+@app.get("/deploy-jobs/{job_id}")
+def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    svc.auth(x_api_key)
+    job = svc.jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    return job
 
 
 @app.get("/apps/{namespace}/{app_name}")
 def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, str]:
     svc.auth(x_api_key)
-    dep = svc.core.apps.read_namespaced_deployment(app_name, namespace)
+    try:
+        dep = svc.core.apps.read_namespaced_deployment(app_name, namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return {
+                "namespace": namespace,
+                "app_name": app_name,
+                "status": "not_deployed",
+                "detail": "No deployment exists yet for this app.",
+            }
+        raise
     image = dep.spec.template.spec.containers[0].image if dep.spec.template.spec.containers else ""
     return {
         "namespace": namespace,
         "app_name": app_name,
+        "status": "deployed",
         "replicas": str(dep.spec.replicas or 0),
         "ready_replicas": str(dep.status.ready_replicas or 0),
         "image": image,

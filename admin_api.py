@@ -53,6 +53,7 @@ class ScaleIn(BaseModel):
 
 class RouteIn(BaseModel):
     hostname: str
+    service: Optional[str] = None
 
 
 class TerraformRunIn(BaseModel):
@@ -70,6 +71,15 @@ class InfraReconcileIn(BaseModel):
             "cloudflare_record.apps_wildcard",
         ]
     )
+
+
+class PublicEndpointsReconcileIn(BaseModel):
+    admin_hostname: Optional[str] = None
+    user_hostname: Optional[str] = None
+    monitoring_hostname: Optional[str] = None
+    admin_service: Optional[str] = None
+    user_service: Optional[str] = None
+    monitoring_service: Optional[str] = None
 
 
 app = FastAPI(title="B3Cloud Admin API", version="1.0.0")
@@ -139,6 +149,13 @@ def desired_monitoring_hostname() -> str:
     if not cluster_domain:
         raise HTTPException(status_code=500, detail="cluster_domain is not configured in terraform.tfvars")
     return f"{subdomain}.{cluster_domain}"
+
+
+def desired_hostname(key: str) -> str:
+    value = read_tfvars_value(key)
+    if not value:
+        raise HTTPException(status_code=500, detail=f"{key} is not configured in terraform.tfvars")
+    return value
 
 
 if os.path.isdir(UI_DIR):
@@ -304,7 +321,7 @@ def delete_deployment(namespace: str, app_name: str, _: None = Depends(require_a
 @app.post("/dns/routes")
 def create_dns_route(payload: RouteIn, _: None = Depends(require_admin_token)) -> Dict:
     try:
-        core.cloudflare.ensure_dns_and_tunnel_route(core.cloudflare_config, payload.hostname)
+        core.cloudflare.ensure_dns_and_tunnel_route(core.cloudflare_config, payload.hostname, payload.service)
         return {"status": "configured", "hostname": payload.hostname}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -362,6 +379,38 @@ def infra_reconcile(payload: InfraReconcileIn, _: None = Depends(require_admin_t
         "monitoring_hostname": monitoring_hostname,
         "terraform": terraform_result,
         "cloudflare_route": route_result,
+    }
+
+
+@app.post("/infra/public-endpoints/reconcile")
+def reconcile_public_endpoints(payload: PublicEndpointsReconcileIn, _: None = Depends(require_admin_token)) -> Dict:
+    admin_hostname = payload.admin_hostname or desired_hostname("admin_api_domain")
+    user_hostname = payload.user_hostname or desired_hostname("user_api_domain")
+    monitoring_hostname = payload.monitoring_hostname or desired_monitoring_hostname()
+
+    admin_service = payload.admin_service or "http://178.105.29.217"
+    user_service = payload.user_service or "http://178.105.29.217"
+    monitoring_service = payload.monitoring_service or "http://ingress-nginx-controller.ingress-nginx.svc.cluster.local:80"
+
+    routes = [
+        ("admin", admin_hostname, admin_service),
+        ("user", user_hostname, user_service),
+        ("monitoring", monitoring_hostname, monitoring_service),
+    ]
+
+    results = []
+    failed = False
+    for name, hostname, service in routes:
+        try:
+            core.cloudflare.ensure_dns_and_tunnel_route(core.cloudflare_config, hostname, service)
+            results.append({"name": name, "hostname": hostname, "service": service, "status": "configured"})
+        except Exception as exc:
+            failed = True
+            results.append({"name": name, "hostname": hostname, "service": service, "status": "failed", "detail": str(exc)})
+
+    return {
+        "status": "failed" if failed else "success",
+        "routes": results,
     }
 
 

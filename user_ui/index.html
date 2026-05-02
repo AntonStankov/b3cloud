@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>B3Cloud Launchpad</title>
+    <link rel="stylesheet" href="/user-ui/app.css?v=20260502a">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">B3Cloud User API</p>
+          <h1>Launchpad</h1>
+          <p>Deploy an app from GitHub, inspect its status, and trace the build and rollout job in real time.</p>
+        </div>
+        <div class="auth card">
+          <label for="api-key">User API Key</label>
+          <div class="auth-row">
+            <input id="api-key" type="password" placeholder="Paste X-Api-Key">
+            <button id="save-api-key" class="accent">Save</button>
+          </div>
+          <p id="api-key-state" class="muted">Key is kept in this browser only.</p>
+        </div>
+      </section>
+
+      <section class="summary-grid">
+        <article class="card stat">
+          <span class="label">API Health</span>
+          <strong id="health-status">Unknown</strong>
+          <span class="muted" id="health-detail">Run refresh.</span>
+        </article>
+        <article class="card stat">
+          <span class="label">Apps</span>
+          <strong id="apps-count">0</strong>
+          <span class="muted">Visible deployments</span>
+        </article>
+        <article class="card stat">
+          <span class="label">Namespace Filter</span>
+          <strong id="namespace-summary">All</strong>
+          <span class="muted">Current list scope</span>
+        </article>
+      </section>
+
+      <section class="toolbar card">
+        <div>
+          <h2>Live Data</h2>
+          <p>Refresh health and app inventory from the user-facing API.</p>
+        </div>
+        <div class="toolbar-actions">
+          <input id="apps-namespace" type="text" placeholder="Namespace filter">
+          <button id="refresh-all" class="accent">Refresh All</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="section-head">
+            <h2>Deploy App</h2>
+          </div>
+          <form id="deploy-form" class="form-grid">
+            <label>
+              GitHub URL
+              <input name="github_url" type="url" placeholder="https://github.com/org/repo">
+            </label>
+            <label>
+              Git Revision
+              <input name="git_revision" type="text" value="main">
+            </label>
+            <label>
+              Port
+              <input name="port" type="number" value="8080">
+            </label>
+            <label>
+              Node Arch
+              <select name="node_arch">
+                <option value="">Any</option>
+                <option value="amd64">amd64</option>
+                <option value="arm64">arm64</option>
+              </select>
+            </label>
+            <div class="derived-box wide">
+              <strong>Derived automatically</strong>
+              <p>`repo-name` becomes the app name and namespace.</p>
+              <p>`repo-name.zerotrust-docker-home-server-test.download` becomes the public domain.</p>
+              <p>Your configured Docker Hub registry namespace is used automatically for the image repository.</p>
+            </div>
+            <label class="wide">
+              Environment JSON
+              <textarea name="env" rows="5" placeholder='{"KEY":"value"}'></textarea>
+            </label>
+            <div class="resource-grid wide">
+              <label>
+                CPU Request
+                <input name="cpu_request" type="text" value="100m">
+              </label>
+              <label>
+                CPU Limit
+                <input name="cpu_limit" type="text" value="500m">
+              </label>
+              <label>
+                Memory Request
+                <input name="memory_request" type="text" value="128Mi">
+              </label>
+              <label>
+                Memory Limit
+                <input name="memory_limit" type="text" value="512Mi">
+              </label>
+            </div>
+            <button type="submit" class="accent wide">Deploy</button>
+          </form>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Lookup App</h2>
+          </div>
+          <form id="status-form" class="form-grid compact">
+            <label>
+              GitHub URL
+              <input name="github_url" type="url" placeholder="https://github.com/org/repo">
+            </label>
+            <button type="submit" class="ghost wide">Fetch Status</button>
+          </form>
+          <pre id="status-output" class="snippet">No app selected.</pre>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <div class="section-head">
+            <h2>Applications</h2>
+            <button id="refresh-apps" class="ghost">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Namespace</th>
+                  <th>App</th>
+                  <th>Ready</th>
+                  <th>Replicas</th>
+                  <th>Image</th>
+                </tr>
+              </thead>
+              <tbody id="apps-table"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="section-head">
+            <h2>Console</h2>
+            <button id="clear-console" class="ghost">Clear</button>
+          </div>
+          <pre id="console-output" class="console">Launchpad ready.</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/user-ui/app.js?v=20260502a"></script>
+  </body>
+</html>

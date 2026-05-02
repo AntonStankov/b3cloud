@@ -669,6 +669,10 @@ output "load_balancer_public_ip" {
   value = hcloud_load_balancer.ingress.ipv4
 }
 
+output "control_plane_public_ip" {
+  value = hcloud_server.control_plane[0].ipv4_address
+}
+
 output "cluster_domain_hint" {
   value = "Wildcard DNS is automated in Cloudflare: *.${var.cluster_domain} -> ${var.cloudflare_tunnel_id}.cfargotunnel.com"
 }
@@ -693,6 +697,10 @@ resource "hcloud_server" "admin_api" {
   location    = var.location
   ssh_keys    = [hcloud_ssh_key.admin_api[0].id]
   user_data   = templatefile("${path.module}/templates/b3-api-cloudinit.tftpl", {})
+}
+
+output "api_server_public_ip" {
+  value = var.deploy_separate_api_projects ? hcloud_server.admin_api[0].ipv4_address : ""
 }
 
 resource "cloudflare_record" "admin_api_a" {

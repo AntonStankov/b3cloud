@@ -1,11 +1,30 @@
 #cloud-config
 package_update: true
 packages:
+  - apt-transport-https
+  - caddy
+  - curl
+  - debian-archive-keyring
+  - debian-keyring
+  - docker.io
+  - git
   - python3-pip
   - python3-venv
+  - unzip
 
 runcmd:
   - mkdir -p /opt/b3cloud
+  - systemctl enable --now docker
+  - |
+    cd /tmp
+    curl -fsSLo pack.tgz https://github.com/buildpacks/pack/releases/download/v0.40.2/pack-v0.40.2-linux.tgz
+    tar -xzf pack.tgz
+    install -m 0755 pack /usr/local/bin/pack
+  - |
+    cd /tmp
+    curl -fsSLo terraform.zip https://releases.hashicorp.com/terraform/1.8.2/terraform_1.8.2_linux_amd64.zip
+    unzip -o terraform.zip
+    install -m 0755 terraform /usr/local/bin/terraform
   - |
     cat > /opt/b3cloud/admin_api.py <<'PY'
     from fastapi import FastAPI

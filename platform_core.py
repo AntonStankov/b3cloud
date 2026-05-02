@@ -14,9 +14,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import time
+from copy import deepcopy
+from collections.abc import Callable
 from urllib import error, request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from kubernetes import client, config
@@ -56,6 +62,13 @@ class CloudflareConfig:
 
 
 class PlatformCore:
+    BUILDER_NAME = "platform-builder"
+    BUILDER_KIND = "Builder"
+    BUILD_SERVICE_ACCOUNT = "kpack-builder-sa"
+    REGISTRY_SECRET_NAME = "registry-creds"
+    GIT_SOURCE_SECRET_NAME = "github-basic-auth"
+    PACK_BUILDER_IMAGE = os.getenv("B3CLOUD_PACK_BUILDER_IMAGE", "paketobuildpacks/builder-jammy-base")
+
     def __init__(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
         if kubeconfig:
             config.load_kube_config(config_file=kubeconfig, context=context)
@@ -69,28 +82,28 @@ class PlatformCore:
         self.cloudflare = CloudflareAutomation()
         self.cloudflare_config = self._load_cloudflare_config_from_env()
 
-    def new_deployment(self, req: DeploymentRequest) -> Dict[str, str]:
+    def new_deployment(
+        self,
+        req: DeploymentRequest,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, str]:
         self._validate_deployment_request(req)
+        self._emit_status(status_callback, f"Preparing namespace '{req.namespace}'.")
         self._ensure_namespace(req.namespace)
         self._apply_namespace_guardrails(req.namespace)
+        self._ensure_build_namespace_prereqs(req.namespace)
 
-        kpack_image_name = f"{req.app_name}-image"
         output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(req.github_url + req.git_revision)}"
+        self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
+        ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
-        self._create_or_update_kpack_image(
-            namespace=req.namespace,
-            image_name=kpack_image_name,
-            github_url=req.github_url,
-            git_revision=req.git_revision,
-            output_image=output_image,
-        )
-
-        ready_image = self._wait_for_kpack_image_ready(req.namespace, kpack_image_name, timeout_seconds=1800)
-
+        self._emit_status(status_callback, f"Applying Kubernetes Deployment/Service/Ingress for '{req.app_name}'.")
         self._create_or_update_deployment(req, ready_image)
         self._create_or_update_service(req.namespace, req.app_name, req.port)
         self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
+        self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
         self.cloudflare.ensure_dns_and_tunnel_route(self.cloudflare_config, req.target_host)
+        self._emit_status(status_callback, f"Deployment finished for {req.app_name}.")
 
         return {
             "namespace": req.namespace,
@@ -193,11 +206,10 @@ class PlatformCore:
             },
             "spec": {
                 "tag": output_image,
-                "serviceAccountName": "kpack-builder-sa",
+                "serviceAccountName": self.BUILD_SERVICE_ACCOUNT,
                 "builder": {
-                    "kind": "Builder",
-                    "name": "platform-builder",
-                    "namespace": "kpack",
+                    "kind": self.BUILDER_KIND,
+                    "name": self.BUILDER_NAME,
                 },
                 "source": {
                     "git": {
@@ -239,13 +251,120 @@ class PlatformCore:
             ready = self._condition_is_true(status.get("conditions", []), "Ready")
             if ready and latest:
                 return latest
+            latest_build = status.get("latestBuildRef")
+            if latest_build:
+                build = self.custom.get_namespaced_custom_object(group, version, namespace, "builds", latest_build)
+                build_message = self._first_false_condition_message(build.get("status", {}).get("conditions", []))
+                if build_message:
+                    raise RuntimeError(f"kpack build {latest_build} failed: {build_message}")
+            ready_message = self._first_false_condition_message(status.get("conditions", []), condition_type="Ready")
+            if ready_message and "build '" not in ready_message.lower():
+                raise RuntimeError(f"kpack image {image_name} is not ready: {ready_message}")
             time.sleep(5)
 
         raise TimeoutError(f"Timed out waiting for kpack Image/{image_name} to become ready")
 
+    def _build_image_with_pack(
+        self,
+        req: DeploymentRequest,
+        output_image: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
+        registry_password = os.getenv("B3CLOUD_REGISTRY_PASSWORD", "")
+        github_pat = os.getenv("B3CLOUD_GITHUB_PAT", "")
+        if not registry_username or not registry_password:
+            raise RuntimeError("Server misconfigured: B3CLOUD_REGISTRY_USERNAME or B3CLOUD_REGISTRY_PASSWORD is not set")
+
+        if shutil.which("pack") is None:
+            raise RuntimeError("Server misconfigured: pack CLI is not installed")
+        if shutil.which("docker") is None:
+            raise RuntimeError("Server misconfigured: docker CLI is not installed")
+        if shutil.which("git") is None:
+            raise RuntimeError("Server misconfigured: git is not installed")
+
+        with tempfile.TemporaryDirectory(prefix="b3cloud-build-") as tmpdir:
+            env = os.environ.copy()
+            env["DOCKER_BUILDKIT"] = "1"
+            env["PORT"] = str(req.port)
+            env["HOME"] = env.get("HOME") or str(Path(tmpdir) / "home")
+            env["PACK_HOME"] = str(Path(env["HOME"]) / ".pack")
+            env["XDG_CACHE_HOME"] = str(Path(env["HOME"]) / ".cache")
+            env["DOCKER_CONFIG"] = str(Path(env["HOME"]) / ".docker")
+            Path(env["PACK_HOME"]).mkdir(parents=True, exist_ok=True)
+            Path(env["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
+            Path(env["DOCKER_CONFIG"]).mkdir(parents=True, exist_ok=True)
+            self._emit_status(status_callback, f"Logging in to registry {req.registry_repo.split('/')[0]}.")
+            self._run_command(
+                ["docker", "login", req.registry_repo.split("/")[0], "-u", registry_username, "--password-stdin"],
+                env=env,
+                input_text=registry_password,
+            )
+            self._emit_status(status_callback, f"Seeding registry access for {req.app_name} if needed.")
+            self._ensure_registry_seed_image(req, env)
+
+            repo_dir = Path(tmpdir) / "src"
+            try:
+                self._emit_status(status_callback, f"Cloning source repo {req.github_url}.")
+                self._run_command(["git", "clone", req.github_url, str(repo_dir)])
+            except RuntimeError:
+                clone_url = self._github_clone_url(req.github_url, github_pat)
+                if clone_url == req.github_url:
+                    raise
+                self._emit_status(status_callback, "Retrying clone with GitHub token.")
+                self._run_command(["git", "clone", clone_url, str(repo_dir)])
+            self._run_command(["git", "-C", str(repo_dir), "checkout", req.git_revision])
+            app_dir = self._detect_app_path(repo_dir)
+            self._emit_status(status_callback, f"Detected app path: {app_dir}.")
+
+            cmd = [
+                "pack",
+                "build",
+                output_image,
+                "--path",
+                str(app_dir),
+                "--builder",
+                self.PACK_BUILDER_IMAGE,
+                "--publish",
+                "--verbose",
+            ]
+            inferred_build_env = self._infer_build_env(app_dir)
+            for key, value in inferred_build_env.items():
+                env[key] = value
+                cmd.extend(["--env", f"{key}={value}"])
+            for key, value in req.env.items():
+                env[key] = value
+                cmd.extend(["--env", f"{key}={value}"])
+            cmd.extend(["--env", f"PORT={req.port}"])
+            self._emit_status(status_callback, f"Running Buildpacks publish to {output_image}.")
+            self._run_command(cmd, env=env, stream_callback=status_callback)
+            self._emit_status(status_callback, f"Image published: {output_image}.")
+
+        return output_image
+
+    def _ensure_registry_seed_image(self, req: DeploymentRequest, env: Dict[str, str]) -> None:
+        registry_host = req.registry_repo.split("/")[0]
+        target_repo = f"{req.registry_repo}/{req.app_name}"
+        bootstrap_tag = f"{target_repo}:bootstrap"
+
+        if registry_host != "ghcr.io":
+            return
+
+        try:
+            self._run_command(["docker", "manifest", "inspect", bootstrap_tag], env=env)
+            return
+        except RuntimeError:
+            pass
+
+        self._run_command(["docker", "pull", "docker.io/library/alpine:3.20"], env=env)
+        self._run_command(["docker", "tag", "docker.io/library/alpine:3.20", bootstrap_tag], env=env)
+        self._run_command(["docker", "push", bootstrap_tag], env=env)
+        self._run_command(["docker", "rmi", bootstrap_tag], env=env)
+
     def _create_or_update_deployment(self, req: DeploymentRequest, image: str) -> None:
         labels = {"app": req.app_name}
-        env = [client.V1EnvVar(name=k, value=v) for k, v in req.env.items()]
+        env = [client.V1EnvVar(name="PORT", value=str(req.port))]
+        env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items())
 
         container = client.V1Container(
             name=req.app_name,
@@ -265,12 +384,15 @@ class PlatformCore:
         )
 
         node_selector = {}
-        if req.node_arch in {"amd64", "arm64"}:
-            node_selector["kubernetes.io/arch"] = req.node_arch
+        node_selector["kubernetes.io/arch"] = req.node_arch if req.node_arch in {"amd64", "arm64"} else "amd64"
 
         template = client.V1PodTemplateSpec(
             metadata=client.V1ObjectMeta(labels=labels),
-            spec=client.V1PodSpec(containers=[container], node_selector=node_selector or None),
+            spec=client.V1PodSpec(
+                containers=[container],
+                image_pull_secrets=[client.V1LocalObjectReference(name=self.REGISTRY_SECRET_NAME)],
+                node_selector=node_selector,
+            ),
         )
 
         body = client.V1Deployment(
@@ -352,20 +474,86 @@ class PlatformCore:
                 raise
 
     def _apply_core_object(self, namespace: str, plural: str, name: str, manifest: Dict) -> None:
+        if plural == "resourcequotas":
+            self._upsert_resource_quota(namespace, manifest)
+            return
+        if plural == "limitranges":
+            self._upsert_limit_range(namespace, manifest)
+            return
+        raise ValueError(f"Unsupported core plural for native apply: {plural}")
+
+    def _ensure_build_namespace_prereqs(self, namespace: str) -> None:
+        self._sync_secret_from_namespace("kpack", self.REGISTRY_SECRET_NAME, namespace, required=True)
+        self._sync_secret_from_namespace("kpack", self.GIT_SOURCE_SECRET_NAME, namespace, required=False)
+        self._upsert_service_account(
+            namespace,
+            self.BUILD_SERVICE_ACCOUNT,
+            secret_names=[self.REGISTRY_SECRET_NAME, self.GIT_SOURCE_SECRET_NAME],
+            image_pull_secret_names=[self.REGISTRY_SECRET_NAME],
+        )
+
+    def _sync_secret_from_namespace(
+        self,
+        source_namespace: str,
+        secret_name: str,
+        target_namespace: str,
+        required: bool,
+    ) -> None:
         try:
-            self.custom.get_namespaced_custom_object("", "v1", namespace, plural, name)
-            self.custom.patch_namespaced_custom_object("", "v1", namespace, plural, name, manifest)
+            source = self.core.read_namespaced_secret(secret_name, source_namespace)
+        except ApiException as exc:
+            if exc.status == 404 and not required:
+                return
+            raise
+
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=secret_name, namespace=target_namespace),
+            type=source.type,
+            data=deepcopy(source.data),
+            string_data=deepcopy(source.string_data) if source.string_data else None,
+        )
+
+        try:
+            self.core.read_namespaced_secret(secret_name, target_namespace)
+            self.core.patch_namespaced_secret(secret_name, target_namespace, body)
         except ApiException as exc:
             if exc.status == 404:
-                self.custom.create_namespaced_custom_object("", "v1", namespace, plural, manifest)
+                self.core.create_namespaced_secret(target_namespace, body)
             else:
-                # Fallback to native core API methods when CustomObjects API is unsupported for core resources.
-                if plural == "resourcequotas":
-                    self._upsert_resource_quota(namespace, manifest)
-                elif plural == "limitranges":
-                    self._upsert_limit_range(namespace, manifest)
-                else:
+                raise
+
+    def _upsert_service_account(
+        self,
+        namespace: str,
+        name: str,
+        secret_names: Iterable[str],
+        image_pull_secret_names: Iterable[str],
+    ) -> None:
+        existing_secrets = []
+        for secret_name in secret_names:
+            try:
+                self.core.read_namespaced_secret(secret_name, namespace)
+                existing_secrets.append(secret_name)
+            except ApiException as exc:
+                if exc.status != 404:
                     raise
+
+        body = client.V1ServiceAccount(
+            metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+            secrets=[client.V1ObjectReference(name=secret_name) for secret_name in existing_secrets],
+            image_pull_secrets=[
+                client.V1LocalObjectReference(name=secret_name) for secret_name in image_pull_secret_names
+            ],
+        )
+
+        try:
+            self.core.read_namespaced_service_account(name, namespace)
+            self.core.patch_namespaced_service_account(name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.core.create_namespaced_service_account(namespace, body)
+            else:
+                raise
 
     def _upsert_resource_quota(self, namespace: str, manifest: Dict) -> None:
         body = client.V1ResourceQuota(
@@ -416,18 +604,135 @@ class PlatformCore:
         return False
 
     @staticmethod
+    def _first_false_condition_message(conditions: Iterable[Dict], condition_type: Optional[str] = None) -> Optional[str]:
+        for condition in conditions:
+            if condition_type and condition.get("type") != condition_type:
+                continue
+            if condition.get("status") == "False":
+                return condition.get("message") or condition.get("reason") or "Unknown failure"
+        return None
+
+    @staticmethod
     def _short_hash(value: str) -> str:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _github_clone_url(github_url: str, github_pat: str) -> str:
+        if not github_pat or "github.com/" not in github_url:
+            return github_url
+        return github_url.replace("https://github.com/", f"https://x-access-token:{github_pat}@github.com/")
+
+    @staticmethod
+    def _detect_app_path(repo_dir: Path) -> Path:
+        markers = ["package.json", "pyproject.toml", "requirements.txt", "go.mod", "Gemfile", "composer.json"]
+
+        def score(path: Path) -> tuple[int, int]:
+            count = sum(1 for marker in markers if (path / marker).exists())
+            depth = len(path.relative_to(repo_dir).parts)
+            return (count, -depth)
+
+        candidates = []
+        for path in [repo_dir] + [p for p in repo_dir.iterdir() if p.is_dir()]:
+            marker_count, depth_score = score(path)
+            if marker_count:
+                candidates.append((marker_count, depth_score, path))
+
+        if not candidates:
+            return repo_dir
+
+        candidates.sort(reverse=True)
+        return candidates[0][2]
+
+    @staticmethod
+    def _infer_build_env(app_dir: Path) -> Dict[str, str]:
+        package_json = app_dir / "package.json"
+        if not package_json.exists():
+            return {}
+
+        try:
+            package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+        scripts = package_data.get("scripts", {})
+        dependencies = package_data.get("dependencies", {})
+        dev_dependencies = package_data.get("devDependencies", {})
+        has_build = isinstance(scripts.get("build"), str) and scripts["build"].strip() != ""
+        has_start = isinstance(scripts.get("start"), str) and scripts["start"].strip() != ""
+        combined_dependencies = {**dependencies, **dev_dependencies}
+        is_frontend = any(dep in combined_dependencies for dep in ("vite", "@vitejs/plugin-react", "react", "react-dom"))
+        if has_build and not has_start and is_frontend:
+            return {
+                "BP_NODE_RUN_SCRIPTS": "build",
+                "BP_WEB_SERVER": "nginx",
+                "BP_WEB_SERVER_ROOT": "dist",
+                "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
+            }
+        return {}
+
+    @staticmethod
+    def _emit_status(status_callback: Optional[Callable[[str], None]], message: str) -> None:
+        if status_callback:
+            status_callback(message)
+
+    @staticmethod
+    def _run_command(
+        cmd: list[str],
+        env: Optional[Dict[str, str]] = None,
+        input_text: Optional[str] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        if stream_callback:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE if input_text is not None else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                bufsize=1,
+            )
+            output_chunks: list[str] = []
+            assert process.stdout is not None
+            if input_text is not None and process.stdin is not None:
+                process.stdin.write(input_text)
+                process.stdin.close()
+            for raw_line in process.stdout:
+                line = raw_line.rstrip()
+                output_chunks.append(raw_line)
+                if line:
+                    stream_callback(line)
+            return_code = process.wait()
+            output = "".join(output_chunks).strip()
+            if return_code != 0:
+                raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{output or f'exit code {return_code}'}")
+            return output
+        try:
+            result = subprocess.run(
+                cmd,
+                input=input_text,
+                text=True,
+                env=env,
+                check=True,
+                capture_output=True,
+            )
+            return result.stdout
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip()
+            stdout = exc.stdout.strip()
+            detail_parts = [part for part in (stderr, stdout) if part]
+            detail = "\n".join(detail_parts) if detail_parts else str(exc)
+            raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
 class CloudflareAutomation:
     base_url = "https://api.cloudflare.com/client/v4"
 
-    def ensure_dns_and_tunnel_route(self, cfg: CloudflareConfig, hostname: str) -> None:
+    def ensure_dns_and_tunnel_route(self, cfg: CloudflareConfig, hostname: str, service: Optional[str] = None) -> None:
         cname_target = cfg.tunnel_cname_target or f"{cfg.tunnel_id}.cfargotunnel.com"
         zone_id = self._resolve_zone_id(cfg, hostname)
         self._upsert_cname_record(cfg, zone_id, hostname, cname_target)
-        self._upsert_tunnel_ingress_rule(cfg, hostname)
+        self._upsert_tunnel_ingress_rule(cfg, hostname, service or cfg.tunnel_origin_service)
 
     def _upsert_cname_record(self, cfg: CloudflareConfig, zone_id: str, hostname: str, target: str) -> None:
         existing = self._find_dns_record(cfg, zone_id, hostname, "CNAME")
@@ -472,17 +777,24 @@ class CloudflareAutomation:
             "Ensure the client's domain is added to this Cloudflare account."
         )
 
-    def _upsert_tunnel_ingress_rule(self, cfg: CloudflareConfig, hostname: str) -> None:
+    def _upsert_tunnel_ingress_rule(self, cfg: CloudflareConfig, hostname: str, service: str) -> None:
         path = f"/accounts/{cfg.account_id}/cfd_tunnel/{cfg.tunnel_id}/configurations"
         current = self._api_call(cfg.api_token, "GET", path).get("result", {})
         config_obj = current.get("config", {})
         ingress = config_obj.get("ingress", [])
 
-        if any(isinstance(rule, dict) and rule.get("hostname") == hostname for rule in ingress):
-            return
-
-        filtered = [r for r in ingress if not (isinstance(r, dict) and r.get("service") == "http_status:404")]
-        filtered.append({"hostname": hostname, "service": cfg.tunnel_origin_service})
+        filtered = [
+            r
+            for r in ingress
+            if not (
+                isinstance(r, dict)
+                and (
+                    r.get("service") == "http_status:404"
+                    or r.get("hostname") == hostname
+                )
+            )
+        ]
+        filtered.append({"hostname": hostname, "service": service})
         filtered.append({"service": "http_status:404"})
 
         payload = {"config": {"ingress": filtered}}

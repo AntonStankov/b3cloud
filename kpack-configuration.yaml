@@ -37,11 +37,11 @@ metadata:
   name: platform-store
 spec:
   sources:
-  - image: gcr.io/paketo-buildpacks/nodejs:latest
-  - image: gcr.io/paketo-buildpacks/python:latest
-  - image: gcr.io/paketo-buildpacks/go:latest
-  - image: gcr.io/paketo-buildpacks/procfile:latest
-  - image: gcr.io/paketo-buildpacks/nginx:latest
+  - image: paketobuildpacks/nodejs:latest
+  - image: paketobuildpacks/python:latest
+  - image: paketobuildpacks/go:latest
+  - image: paketobuildpacks/procfile:latest
+  - image: paketobuildpacks/nginx:latest
 ---
 apiVersion: kpack.io/v1alpha2
 kind: ClusterStack
@@ -55,13 +55,14 @@ spec:
     image: paketobuildpacks/run-jammy-base:latest
 ---
 apiVersion: kpack.io/v1alpha2
-kind: Builder
+kind: ClusterBuilder
 metadata:
   name: platform-builder
-  namespace: kpack
 spec:
-  serviceAccountName: kpack-builder-sa
-  tag: "<REGISTRY_SERVER>/platform/builders/platform-builder:latest"
+  serviceAccountRef:
+    name: kpack-builder-sa
+    namespace: kpack
+  tag: "<REGISTRY_SERVER>/<REGISTRY_NAMESPACE>/platform-builder:latest"
   stack:
     name: platform-base-stack
     kind: ClusterStack
@@ -83,6 +84,7 @@ metadata:
   namespace: kpack
 secrets:
 - name: github-basic-auth
+- name: registry-creds
 imagePullSecrets:
 - name: registry-creds
 ---
@@ -121,18 +123,3 @@ spec:
     max:
       cpu: "2"
       memory: "4Gi"
----
-apiVersion: cert-manager.io/v1
-kind: ClusterIssuer
-metadata:
-  name: letsencrypt-prod
-spec:
-  acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
-    email: platform-ops@example.com
-    privateKeySecretRef:
-      name: letsencrypt-prod
-    solvers:
-    - http01:
-        ingress:
-          class: nginx
