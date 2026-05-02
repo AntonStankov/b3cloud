@@ -39,6 +39,7 @@ api_server_type              = "cpx22"
 # Optional Cloudflare hostnames for API VMs.
 admin_api_domain = "admin-api.example.com"
 user_api_domain  = "api.example.com"
+api_ssh_domain   = "b3-api-ssh.example.com"
 
 # Kubernetes provider
 # Path to kubeconfig that Terraform will use after control-plane is up.

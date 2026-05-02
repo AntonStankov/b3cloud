@@ -207,6 +207,12 @@ variable "user_api_domain" {
   description = "Optional FQDN for user API (for Cloudflare A record)."
 }
 
+variable "api_ssh_domain" {
+  type        = string
+  default     = ""
+  description = "Optional unproxied FQDN used by automation to SSH into the API VM."
+}
+
 locals {
   network_cidr      = "10.10.0.0/16"
   subnet_cidr       = "10.10.1.0/24"
@@ -719,6 +725,16 @@ resource "cloudflare_record" "user_api_a" {
   name    = var.user_api_domain
   type    = "A"
   value   = hcloud_server.admin_api[0].ipv4_address
+  proxied = false
+  ttl     = 1
+}
+
+resource "cloudflare_record" "api_ssh_a" {
+  count   = var.deploy_separate_api_projects && var.cloudflare_zone_id != "" && var.api_ssh_domain != "" ? 1 : 0
+  zone_id = var.cloudflare_zone_id
+  name    = var.api_ssh_domain
+  type    = "A"
+  content = hcloud_server.admin_api[0].ipv4_address
   proxied = false
   ttl     = 1
 }
