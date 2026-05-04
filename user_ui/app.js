@@ -4,6 +4,10 @@ const consoleOutput = document.getElementById("console-output");
 const statusOutput = document.getElementById("status-output");
 const analysisOutput = document.getElementById("analysis-output");
 const componentOptions = document.getElementById("component-options");
+const deployState = document.getElementById("deploy-state");
+const deployPercent = document.getElementById("deploy-percent");
+const deployProgressFill = document.getElementById("deploy-progress-fill");
+const deployTimeline = document.getElementById("deploy-timeline");
 let activeJobId = null;
 let lastJobFingerprint = null;
 let latestAnalysis = null;
@@ -111,6 +115,7 @@ async function pollJob(jobId) {
   while (activeJobId === jobId) {
     const job = await api(`/deploy-jobs/${encodeURIComponent(jobId)}`);
     statusOutput.textContent = JSON.stringify(job, null, 2);
+    renderDeployProgress(job);
     const fingerprint = JSON.stringify({
       status: job.status,
       updated_at: job.updated_at,
@@ -171,14 +176,94 @@ async function deployApp(event) {
     null,
     2
   );
+  renderDeployProgress({
+    status: "submitting",
+    logs: ["Submitting deployment request."],
+    updated_at: new Date().toISOString(),
+  });
   log("Deploy started", payload);
   const job = await api("/apps/deploy", {
     method: "POST",
     body: JSON.stringify(payload),
   });
   statusOutput.textContent = JSON.stringify(job, null, 2);
+  renderDeployProgress(job);
   log("Deploy queued", job);
   await pollJob(job.job_id);
+}
+
+const progressMilestones = [
+  { key: "queued", label: "Queued", weight: 5, match: /job queued|queued/i },
+  { key: "started", label: "Started", weight: 10, match: /deploy job started|deploying component/i },
+  { key: "analyze", label: "Analyzed repository", weight: 18, match: /analyzing|detected services|cloning source repo .*service detection/i },
+  { key: "namespace", label: "Prepared namespace", weight: 26, match: /preparing namespace/i },
+  { key: "services", label: "Provisioned internal services", weight: 38, match: /provisioning internal backing services/i },
+  { key: "registry", label: "Authenticated registry", weight: 45, match: /logging in to registry|seeding registry/i },
+  { key: "clone", label: "Cloned source", weight: 52, match: /cloning source repo|retrying clone|using app path/i },
+  { key: "build", label: "Build running", weight: 68, match: /running buildpacks|pack build|running Buildpacks publish/i },
+  { key: "image", label: "Image published", weight: 78, match: /image published/i },
+  { key: "kubernetes", label: "Applied Kubernetes resources", weight: 88, match: /applying kubernetes/i },
+  { key: "route", label: "Configured public route", weight: 94, match: /ensuring cloudflare route/i },
+  { key: "done", label: "Deployment complete", weight: 100, match: /deploy job finished successfully|deployment finished/i },
+];
+
+function renderDeployProgress(job) {
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  const status = String(job.status || "unknown");
+  const reached = new Set();
+  for (const entry of logs) {
+    for (const milestone of progressMilestones) {
+      if (milestone.match.test(String(entry))) {
+        reached.add(milestone.key);
+      }
+    }
+  }
+  if (status === "queued") {
+    reached.add("queued");
+  }
+  if (status === "running") {
+    reached.add("started");
+  }
+  if (status === "succeeded") {
+    progressMilestones.forEach((milestone) => reached.add(milestone.key));
+  }
+
+  let percent = progressMilestones.reduce(
+    (current, milestone) => (reached.has(milestone.key) ? Math.max(current, milestone.weight) : current),
+    status === "submitting" ? 2 : 0
+  );
+  deployState.textContent = statusLabel(status);
+  deployPercent.textContent = `${percent}%`;
+  deployProgressFill.style.width = `${percent}%`;
+  deployProgressFill.dataset.status = status;
+  deployTimeline.innerHTML = progressMilestones
+    .filter((milestone) => reached.has(milestone.key) || status !== "idle")
+    .map((milestone) => {
+      const state = reached.has(milestone.key) ? "done" : "pending";
+      return `<li class="${state}">${escapeHtml(milestone.label)}</li>`;
+    })
+    .join("");
+  if (status === "failed") {
+    deployTimeline.innerHTML += `<li class="failed">${escapeHtml(job.error || lastLog(logs) || "Deployment failed.")}</li>`;
+  }
+  if (!deployTimeline.innerHTML) {
+    deployTimeline.innerHTML = `<li class="pending">No deployment started.</li>`;
+  }
+}
+
+function statusLabel(status) {
+  const labels = {
+    submitting: "Submitting",
+    queued: "Queued",
+    running: "Running",
+    succeeded: "Succeeded",
+    failed: "Failed",
+  };
+  return labels[status] || "Idle";
+}
+
+function lastLog(logs) {
+  return logs.length ? String(logs[logs.length - 1]) : "";
 }
 
 async function analyzeRepo() {
@@ -378,6 +463,7 @@ document.getElementById("deploy-form").addEventListener("submit", async (event) 
   } catch (error) {
     activeJobId = null;
     statusOutput.textContent = JSON.stringify({ status: "failed", detail: String(error) }, null, 2);
+    renderDeployProgress({ status: "failed", error: String(error), logs: [String(error)] });
     log("Deploy failed", String(error));
   }
 });
@@ -401,6 +487,7 @@ bindClick("analyze-repo", analyzeRepo);
 
 apiKeyInput.value = getApiKey();
 setApiKeyBanner();
+renderDeployProgress({ status: "idle", logs: [] });
 
 if (getApiKey()) {
   refreshAll().catch((error) => log("Initial refresh failed", String(error)));

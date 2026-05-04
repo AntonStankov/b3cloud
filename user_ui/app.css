@@ -241,6 +241,90 @@ th {
   color: var(--ink);
 }
 
+.deploy-progress {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  border: 1px solid rgba(20, 75, 62, 0.12);
+  border-radius: 18px;
+  background: rgba(20, 75, 62, 0.06);
+  padding: 14px;
+}
+
+.progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 800;
+}
+
+.progress-head strong {
+  font-size: 28px;
+  letter-spacing: -0.04em;
+}
+
+.progress-bar {
+  height: 14px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(20, 75, 62, 0.12);
+}
+
+.progress-bar span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #1d6b58, #6faf7d);
+  transition: width 0.4s ease;
+}
+
+.progress-bar span[data-status="failed"] {
+  background: linear-gradient(90deg, #aa3324, #d56a3d);
+}
+
+.timeline {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline li {
+  position: relative;
+  padding-left: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.timeline li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.45em;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(20, 75, 62, 0.22);
+}
+
+.timeline li.done {
+  color: var(--ink);
+}
+
+.timeline li.done::before {
+  background: var(--accent);
+}
+
+.timeline li.failed {
+  color: #8f2c20;
+}
+
+.timeline li.failed::before {
+  background: #aa3324;
+}
+
 .derived-box {
   border: 1px solid rgba(20, 75, 62, 0.12);
   border-radius: 18px;

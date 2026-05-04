@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>B3Cloud Launchpad</title>
-    <link rel="stylesheet" href="/user-ui/app.css?v=20260504e">
+    <link rel="stylesheet" href="/user-ui/app.css?v=20260504f">
   </head>
   <body>
     <main class="shell">
@@ -140,7 +140,19 @@
 
         <article class="card">
           <div class="section-head">
-            <h2>Lookup App</h2>
+            <h2>Deployment Status</h2>
+          </div>
+          <div class="deploy-progress">
+            <div class="progress-head">
+              <span id="deploy-state">Idle</span>
+              <strong id="deploy-percent">0%</strong>
+            </div>
+            <div class="progress-bar">
+              <span id="deploy-progress-fill"></span>
+            </div>
+            <ol id="deploy-timeline" class="timeline">
+              <li class="pending">No deployment started.</li>
+            </ol>
           </div>
           <form id="status-form" class="form-grid compact">
             <label>
@@ -185,6 +197,6 @@
       </section>
     </main>
 
-    <script src="/user-ui/app.js?v=20260504e"></script>
+    <script src="/user-ui/app.js?v=20260504f"></script>
   </body>
 </html>
