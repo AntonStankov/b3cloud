@@ -222,13 +222,30 @@ function renderComponents(components) {
     .map((component, index) => {
       const services = (component.services || []).map((service) => service.type).join(", ") || "none";
       const checked = component.type !== "worker" ? "checked" : "";
-      return `<label class="component-card">
-        <input type="checkbox" class="component-select" data-index="${index}" ${checked}>
-        <span>
-          <strong>${escapeHtml(component.name)}</strong>
-          <small>${escapeHtml(component.type)} · ${escapeHtml(component.path)} · services: ${escapeHtml(services)}</small>
-        </span>
-      </label>`;
+      const publicSelected = component.public ? "selected" : "";
+      const privateSelected = component.public ? "" : "selected";
+      return `<article class="component-card">
+        <label class="component-main">
+          <input type="checkbox" class="component-select" data-index="${index}" ${checked}>
+          <span>
+            <strong>${escapeHtml(component.name)}</strong>
+            <small>${escapeHtml(component.type)} · ${escapeHtml(component.path)} · services: ${escapeHtml(services)}</small>
+          </span>
+        </label>
+        <div class="component-controls">
+          <label>
+            Port
+            <input type="number" class="component-port" data-index="${index}" min="1" max="65535" value="${Number(component.port || 8080)}">
+          </label>
+          <label>
+            Access
+            <select class="component-public" data-index="${index}">
+              <option value="true" ${publicSelected}>Public</option>
+              <option value="false" ${privateSelected}>Private</option>
+            </select>
+          </label>
+        </div>
+      </article>`;
     })
     .join("");
 }
@@ -246,6 +263,8 @@ function selectedDeployComponents() {
     if (!component) {
       return;
     }
+    const portInput = document.querySelector(`.component-port[data-index="${input.dataset.index}"]`);
+    const publicInput = document.querySelector(`.component-public[data-index="${input.dataset.index}"]`);
     const services = new Set((component.services || []).map((service) => service.type));
     for (const service of globalServices) {
       if (component.type !== "frontend") {
@@ -256,8 +275,8 @@ function selectedDeployComponents() {
       name: component.name,
       path: component.path,
       type: component.type,
-      public: component.public,
-      port: component.port || 8080,
+      public: publicInput ? publicInput.value === "true" : Boolean(component.public),
+      port: portInput ? Number(portInput.value || 8080) : Number(component.port || 8080),
       auto_detect_services: component.type !== "frontend",
       provision_services: Array.from(services),
       env: {},

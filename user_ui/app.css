@@ -280,8 +280,7 @@ th {
   margin-top: 14px;
 }
 
-.service-options label,
-.component-card {
+.service-options label {
   display: flex;
   grid-template-columns: none;
   align-items: center;
@@ -297,18 +296,41 @@ th {
 }
 
 .component-card {
+  display: grid;
+  gap: 12px;
   border-radius: 18px;
-  align-items: flex-start;
+  border: 1px solid rgba(20, 75, 62, 0.12);
+  background: rgba(255, 255, 255, 0.52);
+  padding: 14px;
 }
 
-.component-card span {
+.component-main {
+  display: flex;
+  grid-template-columns: none;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.component-main span {
   display: grid;
   gap: 4px;
 }
 
-.component-card small {
+.component-main small {
   color: var(--muted);
   font-size: 12px;
+}
+
+.component-controls {
+  display: grid;
+  grid-template-columns: 0.8fr 1fr;
+  gap: 10px;
+}
+
+.component-controls input,
+.component-controls select {
+  padding: 9px 10px;
+  border-radius: 12px;
 }
 
 .mini-snippet {
@@ -329,7 +351,8 @@ th {
   .grid,
   .toolbar,
   .service-options,
-  .component-options {
+  .component-options,
+  .component-controls {
     grid-template-columns: 1fr;
   }
 }
