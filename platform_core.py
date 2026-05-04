@@ -107,13 +107,30 @@ class PlatformCore:
     PLATFORM_MANAGED_ENV_NAMES = {
         "PORT",
         "DATABASE_URL",
+        "DB_HOST",
+        "DB_NAME",
+        "DB_PASSWORD",
+        "DB_PORT",
+        "DB_USER",
         "POSTGRES_URL",
         "POSTGRES_HOST",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
         "MYSQL_URL",
         "MYSQL_HOST",
+        "MYSQL_DATABASE",
+        "MYSQL_USER",
+        "MYSQL_PASSWORD",
         "MONGODB_URI",
         "MONGO_URL",
         "MONGODB_HOST",
+        "MONGODB_DATABASE",
+        "MONGODB_USER",
+        "MONGODB_PASSWORD",
+        "MONGO_INITDB_DATABASE",
+        "MONGO_INITDB_ROOT_USERNAME",
+        "MONGO_INITDB_ROOT_PASSWORD",
         "REDIS_URL",
         "REDIS_HOST",
         "RABBITMQ_URL",
@@ -584,10 +601,34 @@ class PlatformCore:
             ),
         )
         self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
-        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "POSTGRES_URL": url, "POSTGRES_HOST": host})
+        self._ensure_connection_secret(
+            namespace,
+            secret_name,
+            {
+                "DATABASE_URL": url,
+                "DB_HOST": host,
+                "DB_NAME": database,
+                "DB_PASSWORD": password["password"],
+                "DB_PORT": "5432",
+                "DB_USER": user,
+                "POSTGRES_URL": url,
+                "POSTGRES_HOST": host,
+                "POSTGRES_DB": database,
+                "POSTGRES_PASSWORD": password["password"],
+                "POSTGRES_USER": user,
+            },
+        )
         env = {
+            "DB_HOST": self._secret_env("DB_HOST", secret_name, "DB_HOST"),
+            "DB_NAME": self._secret_env("DB_NAME", secret_name, "DB_NAME"),
+            "DB_PASSWORD": self._secret_env("DB_PASSWORD", secret_name, "DB_PASSWORD"),
+            "DB_PORT": self._secret_env("DB_PORT", secret_name, "DB_PORT"),
+            "DB_USER": self._secret_env("DB_USER", secret_name, "DB_USER"),
             "POSTGRES_URL": self._secret_env("POSTGRES_URL", secret_name, "POSTGRES_URL"),
             "POSTGRES_HOST": self._secret_env("POSTGRES_HOST", secret_name, "POSTGRES_HOST"),
+            "POSTGRES_DB": self._secret_env("POSTGRES_DB", secret_name, "POSTGRES_DB"),
+            "POSTGRES_PASSWORD": self._secret_env("POSTGRES_PASSWORD", secret_name, "POSTGRES_PASSWORD"),
+            "POSTGRES_USER": self._secret_env("POSTGRES_USER", secret_name, "POSTGRES_USER"),
         }
         if include_database_url:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
@@ -619,10 +660,34 @@ class PlatformCore:
             ),
         )
         self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
-        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "MYSQL_URL": url, "MYSQL_HOST": host})
+        self._ensure_connection_secret(
+            namespace,
+            secret_name,
+            {
+                "DATABASE_URL": url,
+                "DB_HOST": host,
+                "DB_NAME": database,
+                "DB_PASSWORD": secret["password"],
+                "DB_PORT": "3306",
+                "DB_USER": user,
+                "MYSQL_URL": url,
+                "MYSQL_HOST": host,
+                "MYSQL_DATABASE": database,
+                "MYSQL_PASSWORD": secret["password"],
+                "MYSQL_USER": user,
+            },
+        )
         env = {
+            "DB_HOST": self._secret_env("DB_HOST", secret_name, "DB_HOST"),
+            "DB_NAME": self._secret_env("DB_NAME", secret_name, "DB_NAME"),
+            "DB_PASSWORD": self._secret_env("DB_PASSWORD", secret_name, "DB_PASSWORD"),
+            "DB_PORT": self._secret_env("DB_PORT", secret_name, "DB_PORT"),
+            "DB_USER": self._secret_env("DB_USER", secret_name, "DB_USER"),
             "MYSQL_URL": self._secret_env("MYSQL_URL", secret_name, "MYSQL_URL"),
             "MYSQL_HOST": self._secret_env("MYSQL_HOST", secret_name, "MYSQL_HOST"),
+            "MYSQL_DATABASE": self._secret_env("MYSQL_DATABASE", secret_name, "MYSQL_DATABASE"),
+            "MYSQL_PASSWORD": self._secret_env("MYSQL_PASSWORD", secret_name, "MYSQL_PASSWORD"),
+            "MYSQL_USER": self._secret_env("MYSQL_USER", secret_name, "MYSQL_USER"),
         }
         if include_database_url:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
@@ -653,10 +718,42 @@ class PlatformCore:
             ),
         )
         self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
-        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "MONGODB_URI": url, "MONGO_URL": url, "MONGODB_HOST": host})
+        self._ensure_connection_secret(
+            namespace,
+            secret_name,
+            {
+                "DATABASE_URL": url,
+                "DB_HOST": host,
+                "DB_NAME": database,
+                "DB_PASSWORD": secret["password"],
+                "DB_PORT": "27017",
+                "DB_USER": user,
+                "MONGODB_URI": url,
+                "MONGO_URL": url,
+                "MONGODB_HOST": host,
+                "MONGODB_DATABASE": database,
+                "MONGODB_PASSWORD": secret["password"],
+                "MONGODB_USER": user,
+                "MONGO_INITDB_DATABASE": database,
+                "MONGO_INITDB_ROOT_PASSWORD": secret["password"],
+                "MONGO_INITDB_ROOT_USERNAME": user,
+            },
+        )
         env = {
+            "DB_HOST": self._secret_env("DB_HOST", secret_name, "DB_HOST"),
+            "DB_NAME": self._secret_env("DB_NAME", secret_name, "DB_NAME"),
+            "DB_PASSWORD": self._secret_env("DB_PASSWORD", secret_name, "DB_PASSWORD"),
+            "DB_PORT": self._secret_env("DB_PORT", secret_name, "DB_PORT"),
+            "DB_USER": self._secret_env("DB_USER", secret_name, "DB_USER"),
             "MONGODB_URI": self._secret_env("MONGODB_URI", secret_name, "MONGODB_URI"),
             "MONGO_URL": self._secret_env("MONGO_URL", secret_name, "MONGO_URL"),
+            "MONGODB_HOST": self._secret_env("MONGODB_HOST", secret_name, "MONGODB_HOST"),
+            "MONGODB_DATABASE": self._secret_env("MONGODB_DATABASE", secret_name, "MONGODB_DATABASE"),
+            "MONGODB_PASSWORD": self._secret_env("MONGODB_PASSWORD", secret_name, "MONGODB_PASSWORD"),
+            "MONGODB_USER": self._secret_env("MONGODB_USER", secret_name, "MONGODB_USER"),
+            "MONGO_INITDB_DATABASE": self._secret_env("MONGO_INITDB_DATABASE", secret_name, "MONGO_INITDB_DATABASE"),
+            "MONGO_INITDB_ROOT_PASSWORD": self._secret_env("MONGO_INITDB_ROOT_PASSWORD", secret_name, "MONGO_INITDB_ROOT_PASSWORD"),
+            "MONGO_INITDB_ROOT_USERNAME": self._secret_env("MONGO_INITDB_ROOT_USERNAME", secret_name, "MONGO_INITDB_ROOT_USERNAME"),
         }
         if include_database_url:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
@@ -1161,29 +1258,6 @@ class PlatformCore:
     @staticmethod
     def _detect_env_requirements(app_dir: Path) -> list[EnvRequirement]:
         env: Dict[str, EnvRequirement] = {}
-        platform_managed_names = {
-            "PORT",
-            "DATABASE_URL",
-            "POSTGRES_URL",
-            "POSTGRES_HOST",
-            "MYSQL_URL",
-            "MYSQL_HOST",
-            "MONGODB_URI",
-            "MONGO_URL",
-            "MONGODB_HOST",
-            "REDIS_URL",
-            "REDIS_HOST",
-            "RABBITMQ_URL",
-            "AMQP_URL",
-            "RABBITMQ_HOST",
-            "API_URL",
-            "BACKEND_URL",
-            "API_PUBLIC_URL",
-            "BACKEND_PUBLIC_URL",
-            "VITE_API_URL",
-            "VITE_BACKEND_URL",
-            "B3_COMPONENTS_JSON",
-        }
         secret_markers = ("SECRET", "TOKEN", "KEY", "PASSWORD", "PASS", "PRIVATE", "CREDENTIAL", "MONGO", "DATABASE", "REDIS", "RABBIT", "AMQP")
 
         def upsert(name: str, required: bool, source: str, evidence: str) -> None:
@@ -1191,7 +1265,7 @@ class PlatformCore:
                 return
             item = env.get(name)
             is_secret = any(marker in name for marker in secret_markers)
-            platform_managed = name in platform_managed_names
+            platform_managed = name in PlatformCore.PLATFORM_MANAGED_ENV_NAMES
             if item:
                 item.required = item.required or required
                 item.secret = item.secret or is_secret
