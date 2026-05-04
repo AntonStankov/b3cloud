@@ -31,6 +31,17 @@ class ResourceLimitsIn(BaseModel):
     memory_limit: str = "512Mi"
 
 
+class ComponentDeployIn(BaseModel):
+    name: str
+    path: str = "."
+    type: str = "backend"
+    public: bool = True
+    port: int = 8080
+    auto_detect_services: bool = True
+    provision_services: List[str] = Field(default_factory=list)
+    env: Dict[str, str] = Field(default_factory=dict)
+
+
 class AppDeployIn(BaseModel):
     github_url: str
     env: Dict[str, str] = Field(default_factory=dict)
@@ -39,6 +50,7 @@ class AppDeployIn(BaseModel):
     node_arch: Optional[str] = None
     auto_detect_services: bool = True
     provision_services: List[str] = Field(default_factory=list)
+    components: List[ComponentDeployIn] = Field(default_factory=list)
     resources: ResourceLimitsIn = Field(default_factory=ResourceLimitsIn)
 
 
@@ -81,6 +93,21 @@ class UserApi:
             "namespace": safe_name,
             "domain": f"{safe_name}.{self.cluster_domain}",
             "registry_repo": f"{self.registry_server}/{self.registry_namespace}",
+        }
+
+    def component_defaults(self, defaults: Dict[str, str], component: ComponentDeployIn, multi_component: bool) -> Dict[str, str]:
+        component_name = sanitize_name(component.name or Path(component.path).name or "app")
+        app_name = sanitize_name(f"{defaults['app_name']}-{component_name}") if multi_component else defaults["app_name"]
+        namespace = defaults["namespace"]
+        return {
+            "repo_name": defaults["repo_name"],
+            "component_name": component_name,
+            "component_path": component.path,
+            "component_type": component.type,
+            "app_name": app_name,
+            "namespace": namespace,
+            "domain": f"{app_name}.{self.cluster_domain}",
+            "registry_repo": defaults["registry_repo"],
         }
 
 
@@ -130,6 +157,7 @@ class DeployJobStore:
                 "registry_repo": defaults["registry_repo"],
                 "auto_detect_services": payload.auto_detect_services,
                 "provision_services": payload.provision_services,
+                "components": [component.model_dump() for component in payload.components],
                 "logs": ["Job queued."],
                 "result": None,
                 "error": None,
@@ -190,17 +218,74 @@ class DeployJobStore:
 
 
 def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str]) -> None:
-    svc.jobs.set_status(job_id, "running")
-    svc.jobs.append_log(job_id, "Deploy job started.")
+    try:
+        svc.jobs.set_status(job_id, "running")
+        svc.jobs.append_log(job_id, "Deploy job started.")
+        components = payload.components
+        if not components:
+            components = [
+                ComponentDeployIn(
+                    name=defaults["app_name"],
+                    path=".",
+                    type="backend",
+                    public=True,
+                    port=payload.port,
+                    auto_detect_services=payload.auto_detect_services,
+                    provision_services=payload.provision_services,
+                    env=payload.env,
+                )
+            ]
+
+        results: List[Dict[str, object]] = []
+        multi_component = len(components) > 1
+        for component in components:
+            component_defaults = svc.component_defaults(defaults, component, multi_component)
+            svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
+            result = _deploy_component(job_id, payload, component, component_defaults)
+            results.append(result)
+        svc.jobs.append_log(job_id, "Deploy job finished successfully.")
+        if len(results) == 1:
+            svc.jobs.set_result(job_id, results[0])
+            return
+        svc.jobs.set_result(
+            job_id,
+            {
+                "repo_name": defaults["repo_name"],
+                "namespace": defaults["namespace"],
+                "status": "deployed",
+                "components": results,
+            },
+        )
+    except Exception as exc:
+        svc.jobs.append_log(job_id, f"Deploy job failed: {exc}")
+        trace = traceback.format_exc()
+        svc.jobs.append_log(job_id, trace.strip())
+        svc.jobs.set_error(job_id, str(exc))
+
+
+def _deploy_component(
+    job_id: str,
+    payload: AppDeployIn,
+    component: ComponentDeployIn,
+    defaults: Dict[str, str],
+) -> Dict[str, object]:
     service_requirements: List[ServiceRequirement] = []
-    if payload.auto_detect_services:
-        svc.jobs.append_log(job_id, "Analyzing repository for backing service requirements.")
+    if component.auto_detect_services and component.type in {"backend", "worker"}:
+        svc.jobs.append_log(job_id, f"Analyzing {component.path} for backing service requirements.")
         analysis = svc.core.analyze_repository(
             payload.github_url,
             git_revision=payload.git_revision,
             status_callback=lambda message: svc.jobs.append_log(job_id, message),
         )
-        detected = analysis.get("services", [])
+        component_analysis = next(
+            (
+                item
+                for item in analysis.get("components", [])
+                if isinstance(item, dict) and item.get("path") == component.path
+            ),
+            None,
+        )
+        detected = (component_analysis or analysis).get("services", [])
         service_requirements.extend(
             ServiceRequirement(
                 type=str(item["type"]),
@@ -213,7 +298,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
         )
         svc.jobs.append_log(job_id, f"Detected services: {', '.join(s.type for s in service_requirements) or 'none'}.")
 
-    requested_types = {service.strip().lower() for service in payload.provision_services if service.strip()}
+    requested_types = {service.strip().lower() for service in component.provision_services if service.strip()}
     existing_types = {service.type for service in service_requirements}
     for service_type in sorted(requested_types - existing_types):
         service_requirements.append(
@@ -227,7 +312,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
 
     req = DeploymentRequest(
         github_url=payload.github_url,
-        env=payload.env,
+        env={**payload.env, **component.env},
         resources=ResourceLimits(
             cpu_request=payload.resources.cpu_request,
             cpu_limit=payload.resources.cpu_limit,
@@ -239,29 +324,27 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
         target_host=defaults["domain"],
         registry_repo=defaults["registry_repo"],
         git_revision=payload.git_revision,
-        port=payload.port,
+        app_path=component.path,
+        port=component.port or payload.port,
         node_arch=payload.node_arch,
         service_requirements=service_requirements,
+        public=component.public,
     )
-    try:
-        result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
-        result.update(
-            {
-                "repo_name": defaults["repo_name"],
-                "namespace": defaults["namespace"],
-                "app_name": defaults["app_name"],
-                "domain": defaults["domain"],
-                "registry_repo": defaults["registry_repo"],
-                "services": [service.type for service in service_requirements if service.provision],
-            }
-        )
-        svc.jobs.append_log(job_id, "Deploy job finished successfully.")
-        svc.jobs.set_result(job_id, result)
-    except Exception as exc:
-        svc.jobs.append_log(job_id, f"Deploy job failed: {exc}")
-        trace = traceback.format_exc()
-        svc.jobs.append_log(job_id, trace.strip())
-        svc.jobs.set_error(job_id, str(exc))
+    result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
+    result.update(
+        {
+            "repo_name": defaults["repo_name"],
+            "component_name": defaults["component_name"],
+            "component_path": defaults["component_path"],
+            "component_type": defaults["component_type"],
+            "namespace": defaults["namespace"],
+            "app_name": defaults["app_name"],
+            "domain": defaults["domain"],
+            "registry_repo": defaults["registry_repo"],
+            "services": [service.type for service in service_requirements if service.provision],
+        }
+    )
+    return result
 
 
 def _now() -> str:

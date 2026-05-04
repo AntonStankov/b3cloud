@@ -267,18 +267,21 @@ th {
 }
 
 .inline-check input,
-.service-options input {
+.service-options input,
+.component-card input {
   width: auto;
 }
 
-.service-options {
+.service-options,
+.component-options {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   margin-top: 14px;
 }
 
-.service-options label {
+.service-options label,
+.component-card {
   display: flex;
   grid-template-columns: none;
   align-items: center;
@@ -287,6 +290,25 @@ th {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.52);
   padding: 10px 12px;
+}
+
+.component-options {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.component-card {
+  border-radius: 18px;
+  align-items: flex-start;
+}
+
+.component-card span {
+  display: grid;
+  gap: 4px;
+}
+
+.component-card small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .mini-snippet {
@@ -306,7 +328,8 @@ th {
   .summary-grid,
   .grid,
   .toolbar,
-  .service-options {
+  .service-options,
+  .component-options {
     grid-template-columns: 1fr;
   }
 }

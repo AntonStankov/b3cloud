@@ -3,8 +3,10 @@ const apiKeyState = document.getElementById("api-key-state");
 const consoleOutput = document.getElementById("console-output");
 const statusOutput = document.getElementById("status-output");
 const analysisOutput = document.getElementById("analysis-output");
+const componentOptions = document.getElementById("component-options");
 let activeJobId = null;
 let lastJobFingerprint = null;
+let latestAnalysis = null;
 
 const els = {
   healthStatus: document.getElementById("health-status"),
@@ -142,6 +144,7 @@ async function deployApp(event) {
   const appName = sanitizeName(repoName);
   const envRaw = String(form.get("env") || "").trim();
   const provisionServices = form.getAll("provision_services").map((value) => String(value));
+  const selectedComponents = selectedDeployComponents();
   const payload = {
     github_url: githubUrl,
     git_revision: form.get("git_revision") || "main",
@@ -149,6 +152,7 @@ async function deployApp(event) {
     node_arch: form.get("node_arch") || null,
     auto_detect_services: form.get("auto_detect_services") === "on",
     provision_services: provisionServices,
+    components: selectedComponents,
     env: envRaw ? JSON.parse(envRaw) : {},
     resources: {
       cpu_request: form.get("cpu_request"),
@@ -193,8 +197,10 @@ async function analyzeRepo() {
     method: "POST",
     body: JSON.stringify(payload),
   });
+  latestAnalysis = analysis;
   analysisOutput.textContent = JSON.stringify(analysis, null, 2);
   markDetectedServices(analysis.services || []);
+  renderComponents(analysis.components || []);
   log("Repository Analysis", analysis);
 }
 
@@ -205,6 +211,68 @@ function markDetectedServices(services) {
       input.checked = true;
     }
   });
+}
+
+function renderComponents(components) {
+  if (!components.length) {
+    componentOptions.innerHTML = `<p class="muted">No deployable components found. The root app path will be used.</p>`;
+    return;
+  }
+  componentOptions.innerHTML = components
+    .map((component, index) => {
+      const services = (component.services || []).map((service) => service.type).join(", ") || "none";
+      const checked = component.type !== "worker" ? "checked" : "";
+      return `<label class="component-card">
+        <input type="checkbox" class="component-select" data-index="${index}" ${checked}>
+        <span>
+          <strong>${escapeHtml(component.name)}</strong>
+          <small>${escapeHtml(component.type)} · ${escapeHtml(component.path)} · services: ${escapeHtml(services)}</small>
+        </span>
+      </label>`;
+    })
+    .join("");
+}
+
+function selectedDeployComponents() {
+  if (!latestAnalysis || !Array.isArray(latestAnalysis.components)) {
+    return [];
+  }
+  const globalServices = new Set(
+    new FormData(document.getElementById("deploy-form")).getAll("provision_services").map((value) => String(value))
+  );
+  const selected = [];
+  document.querySelectorAll(".component-select:checked").forEach((input) => {
+    const component = latestAnalysis.components[Number(input.dataset.index)];
+    if (!component) {
+      return;
+    }
+    const services = new Set((component.services || []).map((service) => service.type));
+    for (const service of globalServices) {
+      if (component.type !== "frontend") {
+        services.add(service);
+      }
+    }
+    selected.push({
+      name: component.name,
+      path: component.path,
+      type: component.type,
+      public: component.public,
+      port: component.port || 8080,
+      auto_detect_services: component.type !== "frontend",
+      provision_services: Array.from(services),
+      env: {},
+    });
+  });
+  return selected;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
 async function fetchStatus(event) {

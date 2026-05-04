@@ -47,6 +47,17 @@ class ServiceRequirement:
 
 
 @dataclass
+class DeployableComponent:
+    name: str
+    path: str
+    type: str
+    public: bool
+    port: int
+    services: list[ServiceRequirement]
+    evidence: list[str]
+
+
+@dataclass
 class DeploymentRequest:
     github_url: str
     env: Dict[str, str]
@@ -56,9 +67,11 @@ class DeploymentRequest:
     target_host: str
     registry_repo: str
     git_revision: str = "main"
+    app_path: str = "."
     port: int = 8080
     node_arch: Optional[str] = None  # "amd64" (CPX) or "arm64" (CAX)
     service_requirements: Optional[list[ServiceRequirement]] = None
+    public: bool = True
 
 
 @dataclass
@@ -112,23 +125,24 @@ class PlatformCore:
             )
             generated_env = self._provision_backing_services(req.namespace, req.app_name, backing_services)
 
-        output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(req.github_url + req.git_revision)}"
+        output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(req.github_url + req.git_revision + req.app_path)}"
         self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
         ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
         self._emit_status(status_callback, f"Applying Kubernetes Deployment/Service/Ingress for '{req.app_name}'.")
         self._create_or_update_deployment(req, ready_image, generated_env)
         self._create_or_update_service(req.namespace, req.app_name, req.port)
-        self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
-        self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
-        self.cloudflare.ensure_dns_and_tunnel_route(self.cloudflare_config, req.target_host)
+        if req.public:
+            self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
+            self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
+            self.cloudflare.ensure_dns_and_tunnel_route(self.cloudflare_config, req.target_host)
         self._emit_status(status_callback, f"Deployment finished for {req.app_name}.")
 
         return {
             "namespace": req.namespace,
             "app_name": req.app_name,
             "image": ready_image,
-            "url": f"https://{req.target_host}",
+            "url": f"https://{req.target_host}" if req.public else "",
             "status": "deployed",
             "services": ",".join(sorted({svc.type for svc in backing_services})),
         }
@@ -152,13 +166,15 @@ class PlatformCore:
                 self._emit_status(status_callback, "Retrying analysis clone with GitHub token.")
                 self._run_command(["git", "clone", clone_url, str(repo_dir)])
             self._run_command(["git", "-C", str(repo_dir), "checkout", git_revision])
-            app_dir = self._detect_app_path(repo_dir)
+            components = self._detect_deployable_components(repo_dir)
+            app_dir = repo_dir / components[0].path if components else self._detect_app_path(repo_dir)
             requirements = self._detect_service_requirements(app_dir)
             return {
                 "github_url": github_url,
                 "git_revision": git_revision,
                 "app_path": str(app_dir.relative_to(repo_dir)),
                 "services": [asdict(req) for req in requirements],
+                "components": [asdict(component) for component in components],
             }
 
     @staticmethod
@@ -362,8 +378,10 @@ class PlatformCore:
                 self._emit_status(status_callback, "Retrying clone with GitHub token.")
                 self._run_command(["git", "clone", clone_url, str(repo_dir)])
             self._run_command(["git", "-C", str(repo_dir), "checkout", req.git_revision])
-            app_dir = self._detect_app_path(repo_dir)
-            self._emit_status(status_callback, f"Detected app path: {app_dir}.")
+            app_dir = self._safe_component_path(repo_dir, req.app_path)
+            if req.app_path == ".":
+                app_dir = self._detect_app_path(repo_dir)
+            self._emit_status(status_callback, f"Using app path: {app_dir}.")
 
             cmd = [
                 "pack",
@@ -993,6 +1011,109 @@ class PlatformCore:
 
         candidates.sort(reverse=True)
         return candidates[0][2]
+
+    @staticmethod
+    def _safe_component_path(repo_dir: Path, app_path: str) -> Path:
+        requested = app_path.strip() or "."
+        path = (repo_dir / requested).resolve()
+        repo_root = repo_dir.resolve()
+        if path != repo_root and repo_root not in path.parents:
+            raise ValueError(f"app_path escapes repository root: {app_path}")
+        if not path.exists() or not path.is_dir():
+            raise ValueError(f"app_path does not exist or is not a directory: {app_path}")
+        return path
+
+    @classmethod
+    def _detect_deployable_components(cls, repo_dir: Path) -> list[DeployableComponent]:
+        markers = {
+            "package.json",
+            "pyproject.toml",
+            "requirements.txt",
+            "go.mod",
+            "Gemfile",
+            "composer.json",
+            "pom.xml",
+            "build.gradle",
+        }
+        ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
+        candidates: list[Path] = []
+        for root, dirs, files in os.walk(repo_dir):
+            root_path = Path(root)
+            rel_parts = root_path.relative_to(repo_dir).parts
+            if len(rel_parts) > 3:
+                dirs[:] = []
+                continue
+            dirs[:] = [directory for directory in dirs if directory not in ignored_dirs]
+            if markers.intersection(files):
+                candidates.append(root_path)
+
+        if not candidates:
+            candidates = [repo_dir]
+
+        components: list[DeployableComponent] = []
+        for path in sorted(set(candidates), key=lambda item: (len(item.relative_to(repo_dir).parts), str(item))):
+            rel = "." if path == repo_dir else str(path.relative_to(repo_dir))
+            name = sanitize_name(path.name if rel != "." else "app") or "app"
+            component_type, evidence = cls._classify_component(path)
+            services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
+            components.append(
+                DeployableComponent(
+                    name=name,
+                    path=rel,
+                    type=component_type,
+                    public=component_type != "worker",
+                    port=8080,
+                    services=services,
+                    evidence=evidence,
+                )
+            )
+        return components
+
+    @staticmethod
+    def _classify_component(app_dir: Path) -> tuple[str, list[str]]:
+        evidence: list[str] = []
+        package_json = app_dir / "package.json"
+        dependencies: Dict[str, str] = {}
+        scripts: Dict[str, str] = {}
+        if package_json.exists():
+            try:
+                package_data = json.loads(package_json.read_text())
+                dependencies = {
+                    **package_data.get("dependencies", {}),
+                    **package_data.get("devDependencies", {}),
+                    **package_data.get("optionalDependencies", {}),
+                }
+                scripts = package_data.get("scripts", {})
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        frontend_deps = {"vite", "@vitejs/plugin-react", "react", "react-dom", "next", "nuxt", "vue", "@angular/core"}
+        backend_deps = {"express", "fastify", "koa", "hapi", "nestjs", "@nestjs/core", "pg", "mysql2", "mongoose", "redis", "ioredis", "amqplib"}
+        if frontend_deps.intersection(dependencies) and not backend_deps.intersection(dependencies):
+            evidence.append("frontend JavaScript dependencies")
+            return "frontend", evidence
+        if backend_deps.intersection(dependencies):
+            evidence.append("backend JavaScript dependencies")
+            return "backend", evidence
+        if (app_dir / "requirements.txt").exists() or (app_dir / "pyproject.toml").exists():
+            text = ((app_dir / "requirements.txt").read_text(errors="ignore") if (app_dir / "requirements.txt").exists() else "").lower()
+            text += ((app_dir / "pyproject.toml").read_text(errors="ignore") if (app_dir / "pyproject.toml").exists() else "").lower()
+            if any(marker in text for marker in ("fastapi", "flask", "django", "uvicorn", "gunicorn")):
+                evidence.append("Python web framework")
+                return "backend", evidence
+            evidence.append("Python project")
+            return "worker", evidence
+        if (app_dir / "go.mod").exists():
+            evidence.append("Go module")
+            return "backend", evidence
+        if (app_dir / "pom.xml").exists() or (app_dir / "build.gradle").exists():
+            evidence.append("Java project")
+            return "backend", evidence
+        if isinstance(scripts.get("start"), str):
+            evidence.append("package.json start script")
+            return "backend", evidence
+        evidence.append("deployable project marker")
+        return "backend", evidence
 
     @staticmethod
     def _infer_build_env(app_dir: Path) -> Dict[str, str]:
