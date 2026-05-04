@@ -2,6 +2,7 @@ const apiKeyInput = document.getElementById("api-key");
 const apiKeyState = document.getElementById("api-key-state");
 const consoleOutput = document.getElementById("console-output");
 const statusOutput = document.getElementById("status-output");
+const analysisOutput = document.getElementById("analysis-output");
 let activeJobId = null;
 let lastJobFingerprint = null;
 
@@ -140,11 +141,14 @@ async function deployApp(event) {
   const namespace = sanitizeName(repoName);
   const appName = sanitizeName(repoName);
   const envRaw = String(form.get("env") || "").trim();
+  const provisionServices = form.getAll("provision_services").map((value) => String(value));
   const payload = {
     github_url: githubUrl,
     git_revision: form.get("git_revision") || "main",
     port: Number(form.get("port") || 8080),
     node_arch: form.get("node_arch") || null,
+    auto_detect_services: form.get("auto_detect_services") === "on",
+    provision_services: provisionServices,
     env: envRaw ? JSON.parse(envRaw) : {},
     resources: {
       cpu_request: form.get("cpu_request"),
@@ -171,6 +175,36 @@ async function deployApp(event) {
   statusOutput.textContent = JSON.stringify(job, null, 2);
   log("Deploy queued", job);
   await pollJob(job.job_id);
+}
+
+async function analyzeRepo() {
+  const formEl = document.getElementById("deploy-form");
+  const form = new FormData(formEl);
+  const githubUrl = String(form.get("github_url") || "").trim();
+  if (!githubUrl) {
+    throw new Error("Enter the GitHub URL before running detection.");
+  }
+  const payload = {
+    github_url: githubUrl,
+    git_revision: form.get("git_revision") || "main",
+  };
+  analysisOutput.textContent = "Analyzing repository...";
+  const analysis = await api("/apps/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  analysisOutput.textContent = JSON.stringify(analysis, null, 2);
+  markDetectedServices(analysis.services || []);
+  log("Repository Analysis", analysis);
+}
+
+function markDetectedServices(services) {
+  const detected = new Set(services.map((service) => service.type));
+  document.querySelectorAll('input[name="provision_services"]').forEach((input) => {
+    if (detected.has(input.value)) {
+      input.checked = true;
+    }
+  });
 }
 
 async function fetchStatus(event) {
@@ -247,6 +281,7 @@ document.getElementById("clear-console").addEventListener("click", () => {
 
 bindClick("refresh-all", refreshAll);
 bindClick("refresh-apps", refreshApps);
+bindClick("analyze-repo", analyzeRepo);
 
 apiKeyInput.value = getApiKey();
 setApiKeyBanner();

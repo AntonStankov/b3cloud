@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>B3Cloud Launchpad</title>
-    <link rel="stylesheet" href="/user-ui/app.css?v=20260502a">
+    <link rel="stylesheet" href="/user-ui/app.css?v=20260504a">
   </head>
   <body>
     <main class="shell">
@@ -79,11 +79,31 @@
                 <option value="arm64">arm64</option>
               </select>
             </label>
+            <div class="wide action-strip">
+              <button id="analyze-repo" type="button" class="ghost">Detect Services</button>
+              <label class="inline-check">
+                <input name="auto_detect_services" type="checkbox" checked>
+                Auto-detect and provision internal services during deploy
+              </label>
+            </div>
+            <div class="derived-box wide">
+              <strong>Internal backing services</strong>
+              <p>Detected or selected databases, Redis, and RabbitMQ are created inside the app namespace with generated credentials.</p>
+              <p>Generated credentials override any user-provided database/cache/broker env vars. These services use ClusterIP only and are not publicly exposed.</p>
+              <div id="service-options" class="service-options">
+                <label><input type="checkbox" name="provision_services" value="postgres"> PostgreSQL</label>
+                <label><input type="checkbox" name="provision_services" value="mysql"> MySQL</label>
+                <label><input type="checkbox" name="provision_services" value="mongodb"> MongoDB</label>
+                <label><input type="checkbox" name="provision_services" value="redis"> Redis</label>
+                <label><input type="checkbox" name="provision_services" value="rabbitmq"> RabbitMQ</label>
+              </div>
+              <pre id="analysis-output" class="mini-snippet">Run detection to inspect repository requirements.</pre>
+            </div>
             <div class="derived-box wide">
               <strong>Derived automatically</strong>
               <p>`repo-name` becomes the app name and namespace.</p>
               <p>`repo-name.zerotrust-docker-home-server-test.download` becomes the public domain.</p>
-              <p>Your configured Docker Hub registry namespace is used automatically for the image repository.</p>
+              <p>Your configured registry namespace is used automatically for the image repository.</p>
             </div>
             <label class="wide">
               Environment JSON
@@ -158,6 +178,6 @@
       </section>
     </main>
 
-    <script src="/user-ui/app.js?v=20260502a"></script>
+    <script src="/user-ui/app.js?v=20260504a"></script>
   </body>
 </html>

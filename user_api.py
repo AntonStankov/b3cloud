@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 
-from platform_core import DeploymentRequest, PlatformCore, ResourceLimits, sanitize_name
+from platform_core import DeploymentRequest, PlatformCore, ResourceLimits, ServiceRequirement, sanitize_name
 
 
 class ResourceLimitsIn(BaseModel):
@@ -37,7 +37,14 @@ class AppDeployIn(BaseModel):
     git_revision: str = "main"
     port: int = 8080
     node_arch: Optional[str] = None
+    auto_detect_services: bool = True
+    provision_services: List[str] = Field(default_factory=list)
     resources: ResourceLimitsIn = Field(default_factory=ResourceLimitsIn)
+
+
+class RepoAnalyzeIn(BaseModel):
+    github_url: str
+    git_revision: str = "main"
 
 
 class UserApi:
@@ -121,6 +128,8 @@ class DeployJobStore:
                 "app_name": defaults["app_name"],
                 "domain": defaults["domain"],
                 "registry_repo": defaults["registry_repo"],
+                "auto_detect_services": payload.auto_detect_services,
+                "provision_services": payload.provision_services,
                 "logs": ["Job queued."],
                 "result": None,
                 "error": None,
@@ -183,6 +192,39 @@ class DeployJobStore:
 def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str]) -> None:
     svc.jobs.set_status(job_id, "running")
     svc.jobs.append_log(job_id, "Deploy job started.")
+    service_requirements: List[ServiceRequirement] = []
+    if payload.auto_detect_services:
+        svc.jobs.append_log(job_id, "Analyzing repository for backing service requirements.")
+        analysis = svc.core.analyze_repository(
+            payload.github_url,
+            git_revision=payload.git_revision,
+            status_callback=lambda message: svc.jobs.append_log(job_id, message),
+        )
+        detected = analysis.get("services", [])
+        service_requirements.extend(
+            ServiceRequirement(
+                type=str(item["type"]),
+                confidence=str(item.get("confidence", "medium")),
+                evidence=[str(evidence) for evidence in item.get("evidence", [])],
+                provision=True,
+            )
+            for item in detected
+            if isinstance(item, dict)
+        )
+        svc.jobs.append_log(job_id, f"Detected services: {', '.join(s.type for s in service_requirements) or 'none'}.")
+
+    requested_types = {service.strip().lower() for service in payload.provision_services if service.strip()}
+    existing_types = {service.type for service in service_requirements}
+    for service_type in sorted(requested_types - existing_types):
+        service_requirements.append(
+            ServiceRequirement(
+                type=service_type,
+                confidence="user-selected",
+                evidence=["Selected in deployment request."],
+                provision=True,
+            )
+        )
+
     req = DeploymentRequest(
         github_url=payload.github_url,
         env=payload.env,
@@ -199,6 +241,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
         git_revision=payload.git_revision,
         port=payload.port,
         node_arch=payload.node_arch,
+        service_requirements=service_requirements,
     )
     try:
         result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
@@ -209,6 +252,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
                 "app_name": defaults["app_name"],
                 "domain": defaults["domain"],
                 "registry_repo": defaults["registry_repo"],
+                "services": [service.type for service in service_requirements if service.provision],
             }
         )
         svc.jobs.append_log(job_id, "Deploy job finished successfully.")
@@ -270,6 +314,15 @@ def list_apps(
             }
         )
     return out
+
+
+@app.post("/apps/analyze")
+def analyze_app(payload: RepoAnalyzeIn, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    svc.auth(x_api_key)
+    defaults = svc.defaults_from_github_url(payload.github_url)
+    analysis = svc.core.analyze_repository(payload.github_url, payload.git_revision)
+    analysis.update(defaults)
+    return analysis
 
 
 @app.post("/apps/deploy")

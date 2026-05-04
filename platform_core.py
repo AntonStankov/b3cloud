@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +22,7 @@ import time
 from copy import deepcopy
 from collections.abc import Callable
 from urllib import error, request
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -38,6 +39,14 @@ class ResourceLimits:
 
 
 @dataclass
+class ServiceRequirement:
+    type: str
+    confidence: str
+    evidence: list[str]
+    provision: bool = True
+
+
+@dataclass
 class DeploymentRequest:
     github_url: str
     env: Dict[str, str]
@@ -49,6 +58,7 @@ class DeploymentRequest:
     git_revision: str = "main"
     port: int = 8080
     node_arch: Optional[str] = None  # "amd64" (CPX) or "arm64" (CAX)
+    service_requirements: Optional[list[ServiceRequirement]] = None
 
 
 @dataclass
@@ -92,13 +102,22 @@ class PlatformCore:
         self._ensure_namespace(req.namespace)
         self._apply_namespace_guardrails(req.namespace)
         self._ensure_build_namespace_prereqs(req.namespace)
+        backing_services = [svc for svc in (req.service_requirements or []) if svc.provision]
+        generated_env: Dict[str, client.V1EnvVar] = {}
+        if backing_services:
+            self._emit_status(
+                status_callback,
+                "Provisioning internal backing services: "
+                + ", ".join(sorted({svc.type for svc in backing_services})),
+            )
+            generated_env = self._provision_backing_services(req.namespace, req.app_name, backing_services)
 
         output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(req.github_url + req.git_revision)}"
         self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
         ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
         self._emit_status(status_callback, f"Applying Kubernetes Deployment/Service/Ingress for '{req.app_name}'.")
-        self._create_or_update_deployment(req, ready_image)
+        self._create_or_update_deployment(req, ready_image, generated_env)
         self._create_or_update_service(req.namespace, req.app_name, req.port)
         self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
         self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
@@ -111,7 +130,36 @@ class PlatformCore:
             "image": ready_image,
             "url": f"https://{req.target_host}",
             "status": "deployed",
+            "services": ",".join(sorted({svc.type for svc in backing_services})),
         }
+
+    def analyze_repository(
+        self,
+        github_url: str,
+        git_revision: str = "main",
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, object]:
+        github_pat = os.getenv("B3CLOUD_GITHUB_PAT", "")
+        with tempfile.TemporaryDirectory(prefix="b3cloud-analyze-") as tmpdir:
+            repo_dir = Path(tmpdir) / "src"
+            try:
+                self._emit_status(status_callback, f"Cloning source repo {github_url} for service detection.")
+                self._run_command(["git", "clone", github_url, str(repo_dir)])
+            except RuntimeError:
+                clone_url = self._github_clone_url(github_url, github_pat)
+                if clone_url == github_url:
+                    raise
+                self._emit_status(status_callback, "Retrying analysis clone with GitHub token.")
+                self._run_command(["git", "clone", clone_url, str(repo_dir)])
+            self._run_command(["git", "-C", str(repo_dir), "checkout", git_revision])
+            app_dir = self._detect_app_path(repo_dir)
+            requirements = self._detect_service_requirements(app_dir)
+            return {
+                "github_url": github_url,
+                "git_revision": git_revision,
+                "app_path": str(app_dir.relative_to(repo_dir)),
+                "services": [asdict(req) for req in requirements],
+            }
 
     @staticmethod
     def _validate_deployment_request(req: DeploymentRequest) -> None:
@@ -361,10 +409,17 @@ class PlatformCore:
         self._run_command(["docker", "push", bootstrap_tag], env=env)
         self._run_command(["docker", "rmi", bootstrap_tag], env=env)
 
-    def _create_or_update_deployment(self, req: DeploymentRequest, image: str) -> None:
+    def _create_or_update_deployment(
+        self,
+        req: DeploymentRequest,
+        image: str,
+        generated_env: Optional[Dict[str, client.V1EnvVar]] = None,
+    ) -> None:
         labels = {"app": req.app_name}
         env = [client.V1EnvVar(name="PORT", value=str(req.port))]
-        env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items())
+        service_env_names = set((generated_env or {}).keys())
+        env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items() if k not in service_env_names)
+        env.extend((generated_env or {}).values())
 
         container = client.V1Container(
             name=req.app_name,
@@ -410,6 +465,302 @@ class PlatformCore:
         except ApiException as exc:
             if exc.status == 404:
                 self.apps.create_namespaced_deployment(req.namespace, body)
+            else:
+                raise
+
+    def _provision_backing_services(
+        self,
+        namespace: str,
+        app_name: str,
+        requirements: list[ServiceRequirement],
+    ) -> Dict[str, client.V1EnvVar]:
+        env: Dict[str, client.V1EnvVar] = {}
+        service_types = sorted({req.type for req in requirements})
+        database_types = {"postgres", "mysql", "mongodb"}.intersection(service_types)
+        include_database_url = len(database_types) == 1
+        for service_type in service_types:
+            if service_type == "postgres":
+                env.update(self._ensure_postgres(namespace, app_name, include_database_url))
+            elif service_type == "mysql":
+                env.update(self._ensure_mysql(namespace, app_name, include_database_url))
+            elif service_type == "mongodb":
+                env.update(self._ensure_mongodb(namespace, app_name, include_database_url))
+            elif service_type == "redis":
+                env.update(self._ensure_redis(namespace, app_name))
+            elif service_type == "rabbitmq":
+                env.update(self._ensure_rabbitmq(namespace, app_name))
+        return env
+
+    def _ensure_postgres(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+        name = f"{app_name}-postgres"
+        secret_name = f"{name}-credentials"
+        user = "app"
+        database = sanitize_name(app_name).replace("-", "_")
+        password = self._ensure_generated_secret(namespace, secret_name, {"username": user, "password": None, "database": database})
+        host = f"{name}.{namespace}.svc.cluster.local"
+        url = f"postgresql://{user}:{password['password']}@{host}:5432/{database}"
+        self._upsert_cluster_ip_service(namespace, name, {"app": name}, [{"name": "postgres", "port": 5432, "target_port": 5432}])
+        container = client.V1Container(
+            name="postgres",
+            image="postgres:16-alpine",
+            ports=[client.V1ContainerPort(container_port=5432)],
+            env=[
+                self._secret_env("POSTGRES_USER", secret_name, "username"),
+                self._secret_env("POSTGRES_PASSWORD", secret_name, "password"),
+                self._secret_env("POSTGRES_DB", secret_name, "database"),
+            ],
+            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/var/lib/postgresql/data")],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "256Mi"},
+                limits={"cpu": "1", "memory": "1Gi"},
+            ),
+        )
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "POSTGRES_URL": url, "POSTGRES_HOST": host})
+        env = {
+            "POSTGRES_URL": self._secret_env("POSTGRES_URL", secret_name, "POSTGRES_URL"),
+            "POSTGRES_HOST": self._secret_env("POSTGRES_HOST", secret_name, "POSTGRES_HOST"),
+        }
+        if include_database_url:
+            env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
+        return env
+
+    def _ensure_mysql(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+        name = f"{app_name}-mysql"
+        secret_name = f"{name}-credentials"
+        user = "app"
+        database = sanitize_name(app_name).replace("-", "_")
+        secret = self._ensure_generated_secret(namespace, secret_name, {"username": user, "password": None, "root_password": None, "database": database})
+        host = f"{name}.{namespace}.svc.cluster.local"
+        url = f"mysql://{user}:{secret['password']}@{host}:3306/{database}"
+        self._upsert_cluster_ip_service(namespace, name, {"app": name}, [{"name": "mysql", "port": 3306, "target_port": 3306}])
+        container = client.V1Container(
+            name="mysql",
+            image="mysql:8.4",
+            ports=[client.V1ContainerPort(container_port=3306)],
+            env=[
+                self._secret_env("MYSQL_USER", secret_name, "username"),
+                self._secret_env("MYSQL_PASSWORD", secret_name, "password"),
+                self._secret_env("MYSQL_ROOT_PASSWORD", secret_name, "root_password"),
+                self._secret_env("MYSQL_DATABASE", secret_name, "database"),
+            ],
+            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/var/lib/mysql")],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "512Mi"},
+                limits={"cpu": "1", "memory": "1Gi"},
+            ),
+        )
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "MYSQL_URL": url, "MYSQL_HOST": host})
+        env = {
+            "MYSQL_URL": self._secret_env("MYSQL_URL", secret_name, "MYSQL_URL"),
+            "MYSQL_HOST": self._secret_env("MYSQL_HOST", secret_name, "MYSQL_HOST"),
+        }
+        if include_database_url:
+            env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
+        return env
+
+    def _ensure_mongodb(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+        name = f"{app_name}-mongodb"
+        secret_name = f"{name}-credentials"
+        user = "app"
+        database = sanitize_name(app_name).replace("-", "_")
+        secret = self._ensure_generated_secret(namespace, secret_name, {"username": user, "password": None, "root_password": None, "database": database})
+        host = f"{name}.{namespace}.svc.cluster.local"
+        url = f"mongodb://{user}:{secret['password']}@{host}:27017/{database}?authSource=admin"
+        self._upsert_cluster_ip_service(namespace, name, {"app": name}, [{"name": "mongodb", "port": 27017, "target_port": 27017}])
+        container = client.V1Container(
+            name="mongodb",
+            image="mongo:7",
+            ports=[client.V1ContainerPort(container_port=27017)],
+            env=[
+                self._secret_env("MONGO_INITDB_ROOT_USERNAME", secret_name, "username"),
+                self._secret_env("MONGO_INITDB_ROOT_PASSWORD", secret_name, "password"),
+                self._secret_env("MONGO_INITDB_DATABASE", secret_name, "database"),
+            ],
+            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/data/db")],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "256Mi"},
+                limits={"cpu": "1", "memory": "1Gi"},
+            ),
+        )
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._ensure_connection_secret(namespace, secret_name, {"DATABASE_URL": url, "MONGODB_URI": url, "MONGO_URL": url, "MONGODB_HOST": host})
+        env = {
+            "MONGODB_URI": self._secret_env("MONGODB_URI", secret_name, "MONGODB_URI"),
+            "MONGO_URL": self._secret_env("MONGO_URL", secret_name, "MONGO_URL"),
+        }
+        if include_database_url:
+            env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
+        return env
+
+    def _ensure_redis(self, namespace: str, app_name: str) -> Dict[str, client.V1EnvVar]:
+        name = f"{app_name}-redis"
+        secret_name = f"{name}-credentials"
+        secret = self._ensure_generated_secret(namespace, secret_name, {"password": None})
+        host = f"{name}.{namespace}.svc.cluster.local"
+        url = f"redis://:{secret['password']}@{host}:6379/0"
+        self._upsert_cluster_ip_service(namespace, name, {"app": name}, [{"name": "redis", "port": 6379, "target_port": 6379}])
+        container = client.V1Container(
+            name="redis",
+            image="redis:7-alpine",
+            command=["sh", "-c", 'redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"'],
+            ports=[client.V1ContainerPort(container_port=6379)],
+            env=[self._secret_env("REDIS_PASSWORD", secret_name, "password")],
+            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/data")],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "50m", "memory": "128Mi"},
+                limits={"cpu": "500m", "memory": "512Mi"},
+            ),
+        )
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "2Gi")
+        self._ensure_connection_secret(namespace, secret_name, {"REDIS_URL": url, "REDIS_HOST": host})
+        return {
+            "REDIS_URL": self._secret_env("REDIS_URL", secret_name, "REDIS_URL"),
+            "REDIS_HOST": self._secret_env("REDIS_HOST", secret_name, "REDIS_HOST"),
+        }
+
+    def _ensure_rabbitmq(self, namespace: str, app_name: str) -> Dict[str, client.V1EnvVar]:
+        name = f"{app_name}-rabbitmq"
+        secret_name = f"{name}-credentials"
+        user = "app"
+        secret = self._ensure_generated_secret(namespace, secret_name, {"username": user, "password": None})
+        host = f"{name}.{namespace}.svc.cluster.local"
+        url = f"amqp://{user}:{secret['password']}@{host}:5672/"
+        self._upsert_cluster_ip_service(namespace, name, {"app": name}, [{"name": "amqp", "port": 5672, "target_port": 5672}])
+        container = client.V1Container(
+            name="rabbitmq",
+            image="rabbitmq:3.13-alpine",
+            ports=[client.V1ContainerPort(container_port=5672)],
+            env=[
+                self._secret_env("RABBITMQ_DEFAULT_USER", secret_name, "username"),
+                self._secret_env("RABBITMQ_DEFAULT_PASS", secret_name, "password"),
+            ],
+            volume_mounts=[client.V1VolumeMount(name="data", mount_path="/var/lib/rabbitmq")],
+            resources=client.V1ResourceRequirements(
+                requests={"cpu": "100m", "memory": "256Mi"},
+                limits={"cpu": "1", "memory": "1Gi"},
+            ),
+        )
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "3Gi")
+        self._ensure_connection_secret(namespace, secret_name, {"RABBITMQ_URL": url, "AMQP_URL": url, "RABBITMQ_HOST": host})
+        return {
+            "RABBITMQ_URL": self._secret_env("RABBITMQ_URL", secret_name, "RABBITMQ_URL"),
+            "AMQP_URL": self._secret_env("AMQP_URL", secret_name, "AMQP_URL"),
+        }
+
+    def _ensure_generated_secret(self, namespace: str, name: str, values: Dict[str, Optional[str]]) -> Dict[str, str]:
+        existing_values: Dict[str, str] = {}
+        try:
+            existing = self.core.read_namespaced_secret(name, namespace)
+            if existing.data:
+                import base64
+
+                for key, raw_value in existing.data.items():
+                    existing_values[key] = base64.b64decode(raw_value).decode("utf-8")
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        merged: Dict[str, str] = {}
+        for key, value in values.items():
+            merged[key] = existing_values.get(key) or value or secrets.token_urlsafe(24)
+
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+            type="Opaque",
+            string_data=merged,
+        )
+        try:
+            self.core.read_namespaced_secret(name, namespace)
+            self.core.patch_namespaced_secret(name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.core.create_namespaced_secret(namespace, body)
+            else:
+                raise
+        return merged
+
+    def _ensure_connection_secret(self, namespace: str, name: str, values: Dict[str, str]) -> None:
+        current = self._ensure_generated_secret(namespace, name, {})
+        current.update(values)
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+            type="Opaque",
+            string_data=current,
+        )
+        self.core.patch_namespaced_secret(name, namespace, body)
+
+    @staticmethod
+    def _secret_env(env_name: str, secret_name: str, key: str) -> client.V1EnvVar:
+        return client.V1EnvVar(
+            name=env_name,
+            value_from=client.V1EnvVarSource(
+                secret_key_ref=client.V1SecretKeySelector(name=secret_name, key=key)
+            ),
+        )
+
+    def _upsert_cluster_ip_service(self, namespace: str, name: str, selector: Dict[str, str], ports: list[Dict[str, object]]) -> None:
+        body = client.V1Service(
+            metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+            spec=client.V1ServiceSpec(
+                selector=selector,
+                type="ClusterIP",
+                ports=[
+                    client.V1ServicePort(
+                        name=str(port["name"]),
+                        port=int(port["port"]),
+                        target_port=int(port["target_port"]),
+                    )
+                    for port in ports
+                ],
+            ),
+        )
+        try:
+            self.core.read_namespaced_service(name, namespace)
+            self.core.patch_namespaced_service(name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.core.create_namespaced_service(namespace, body)
+            else:
+                raise
+
+    def _upsert_stateful_set(
+        self,
+        namespace: str,
+        name: str,
+        labels: Dict[str, str],
+        container: client.V1Container,
+        volume_name: str,
+        storage_size: str,
+    ) -> None:
+        body = client.V1StatefulSet(
+            metadata=client.V1ObjectMeta(name=name, namespace=namespace),
+            spec=client.V1StatefulSetSpec(
+                service_name=name,
+                replicas=1,
+                selector=client.V1LabelSelector(match_labels=labels),
+                template=client.V1PodTemplateSpec(
+                    metadata=client.V1ObjectMeta(labels=labels),
+                    spec=client.V1PodSpec(containers=[container]),
+                ),
+                volume_claim_templates=[
+                    client.V1PersistentVolumeClaim(
+                        metadata=client.V1ObjectMeta(name=volume_name),
+                        spec=client.V1PersistentVolumeClaimSpec(
+                            access_modes=["ReadWriteOnce"],
+                            resources=client.V1VolumeResourceRequirements(requests={"storage": storage_size}),
+                        ),
+                    )
+                ],
+            ),
+        )
+        try:
+            self.apps.read_namespaced_stateful_set(name, namespace)
+            self.apps.patch_namespaced_stateful_set(name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.apps.create_namespaced_stateful_set(namespace, body)
             else:
                 raise
 
@@ -669,6 +1020,111 @@ class PlatformCore:
                 "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
             }
         return {}
+
+    @staticmethod
+    def _detect_service_requirements(app_dir: Path) -> list[ServiceRequirement]:
+        evidence: Dict[str, list[str]] = {
+            "postgres": [],
+            "mysql": [],
+            "mongodb": [],
+            "redis": [],
+            "rabbitmq": [],
+        }
+
+        def add(service: str, reason: str) -> None:
+            evidence.setdefault(service, []).append(reason)
+
+        def read_text(path: Path, max_bytes: int = 1_000_000) -> str:
+            try:
+                return path.read_bytes()[:max_bytes].decode("utf-8", errors="ignore")
+            except OSError:
+                return ""
+
+        package_json = app_dir / "package.json"
+        if package_json.exists():
+            try:
+                package_data = json.loads(package_json.read_text())
+                dependencies = {
+                    **package_data.get("dependencies", {}),
+                    **package_data.get("devDependencies", {}),
+                    **package_data.get("optionalDependencies", {}),
+                }
+                dependency_map = {
+                    "postgres": {"pg", "postgres", "postgresql", "prisma", "@prisma/client", "typeorm", "sequelize"},
+                    "mysql": {"mysql", "mysql2", "mariadb", "sequelize", "typeorm"},
+                    "mongodb": {"mongodb", "mongoose"},
+                    "redis": {"redis", "ioredis", "@redis/client", "bull", "bullmq"},
+                    "rabbitmq": {"amqplib", "rascal"},
+                }
+                for service, names in dependency_map.items():
+                    matches = sorted(names.intersection(dependencies.keys()))
+                    if matches:
+                        add(service, f"package.json dependencies: {', '.join(matches)}")
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        text_files = [
+            "requirements.txt",
+            "pyproject.toml",
+            "Pipfile",
+            "poetry.lock",
+            "go.mod",
+            "pom.xml",
+            "build.gradle",
+            "Gemfile",
+            "composer.json",
+            "docker-compose.yml",
+            "compose.yml",
+            ".env.example",
+            ".env.sample",
+            "README.md",
+        ]
+        combined = "\n".join(read_text(app_dir / name) for name in text_files if (app_dir / name).exists()).lower()
+        keyword_map = {
+            "postgres": ["postgres", "postgresql", "psycopg", "asyncpg", "jdbc:postgresql", "provider = \"postgresql\""],
+            "mysql": ["mysql", "mariadb", "pymysql", "mysqlclient", "jdbc:mysql"],
+            "mongodb": ["mongodb", "mongoose", "mongo_uri", "mongodb_uri"],
+            "redis": ["redis", "redis_url", "ioredis", "bullmq"],
+            "rabbitmq": ["rabbitmq", "amqp://", "amqplib", "celery_broker_url"],
+        }
+        for service, keywords in keyword_map.items():
+            hits = [keyword for keyword in keywords if keyword in combined]
+            if hits:
+                add(service, f"config/dependency keywords: {', '.join(sorted(set(hits))[:6])}")
+
+        ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
+        ignored_files = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "Gemfile.lock", "go.sum"}
+        for root, dirs, files in os.walk(app_dir):
+            dirs[:] = [directory for directory in dirs if directory not in ignored_dirs]
+            root_path = Path(root)
+            for filename in files:
+                if filename in ignored_files:
+                    continue
+                path = root_path / filename
+                try:
+                    if path.stat().st_size > 512_000:
+                        continue
+                except OSError:
+                    continue
+                if path.name in {".env", ".npmrc"}:
+                    continue
+                if path.suffix.lower() not in {".js", ".ts", ".jsx", ".tsx", ".py", ".go", ".rb", ".php", ".java", ".kt", ".cs", ".yml", ".yaml", ".toml", ".json"}:
+                    continue
+                content = read_text(path, max_bytes=512_000).lower()
+                rel = str(path.relative_to(app_dir))
+                for service, keywords in keyword_map.items():
+                    hits = [keyword for keyword in keywords if keyword in content]
+                    if hits:
+                        add(service, f"{rel}: {', '.join(sorted(set(hits))[:4])}")
+
+        requirements: list[ServiceRequirement] = []
+        for service, reasons in evidence.items():
+            unique_reasons = list(dict.fromkeys(reasons))[:8]
+            if not unique_reasons:
+                continue
+            confidence = "high" if len(unique_reasons) >= 2 else "medium"
+            requirements.append(ServiceRequirement(type=service, confidence=confidence, evidence=unique_reasons))
+        return requirements
 
     @staticmethod
     def _emit_status(status_callback: Optional[Callable[[str], None]], message: str) -> None:

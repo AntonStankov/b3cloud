@@ -91,7 +91,8 @@ h1 {
 }
 
 .auth-row,
-.toolbar-actions {
+.toolbar-actions,
+.action-strip {
   display: flex;
   gap: 10px;
   align-items: center;
@@ -257,11 +258,55 @@ th {
   color: var(--muted);
 }
 
+.inline-check {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.inline-check input,
+.service-options input {
+  width: auto;
+}
+
+.service-options {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.service-options label {
+  display: flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(20, 75, 62, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.52);
+  padding: 10px 12px;
+}
+
+.mini-snippet {
+  margin: 14px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(20, 75, 62, 0.08);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 1080px) {
   .hero,
   .summary-grid,
   .grid,
-  .toolbar {
+  .toolbar,
+  .service-options {
     grid-template-columns: 1fr;
   }
 }
