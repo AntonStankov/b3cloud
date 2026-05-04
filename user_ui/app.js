@@ -224,6 +224,9 @@ function renderComponents(components) {
       const checked = component.type !== "worker" ? "checked" : "";
       const publicSelected = component.public ? "selected" : "";
       const privateSelected = component.public ? "" : "selected";
+      const portEvidence = Array.isArray(component.port_evidence) && component.port_evidence.length
+        ? component.port_evidence[0]
+        : "No port evidence.";
       return `<article class="component-card">
         <label class="component-main">
           <input type="checkbox" class="component-select" data-index="${index}" ${checked}>
@@ -236,6 +239,7 @@ function renderComponents(components) {
           <label>
             Port
             <input type="number" class="component-port" data-index="${index}" min="1" max="65535" value="${Number(component.port || 8080)}">
+            <small>${escapeHtml(component.port_confidence || "default")}: ${escapeHtml(portEvidence)}</small>
           </label>
           <label>
             Access

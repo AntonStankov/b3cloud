@@ -53,6 +53,8 @@ class DeployableComponent:
     type: str
     public: bool
     port: int
+    port_confidence: str
+    port_evidence: list[str]
     services: list[ServiceRequirement]
     evidence: list[str]
 
@@ -1055,6 +1057,7 @@ class PlatformCore:
             rel = "." if path == repo_dir else str(path.relative_to(repo_dir))
             name = sanitize_name(path.name if rel != "." else "app") or "app"
             component_type, evidence = cls._classify_component(path)
+            port, port_confidence, port_evidence = cls._detect_component_port(path, component_type)
             services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
             components.append(
                 DeployableComponent(
@@ -1062,12 +1065,102 @@ class PlatformCore:
                     path=rel,
                     type=component_type,
                     public=component_type != "worker",
-                    port=8080,
+                    port=port,
+                    port_confidence=port_confidence,
+                    port_evidence=port_evidence,
                     services=services,
                     evidence=evidence,
                 )
             )
         return components
+
+    @staticmethod
+    def _detect_component_port(app_dir: Path, component_type: str) -> tuple[int, str, list[str]]:
+        evidence: list[str] = []
+
+        def valid_port(value: int) -> bool:
+            return 1 <= value <= 65535
+
+        def read(path: Path, max_bytes: int = 512_000) -> str:
+            try:
+                return path.read_bytes()[:max_bytes].decode("utf-8", errors="ignore")
+            except OSError:
+                return ""
+
+        env_candidates = [".env.example", ".env.sample", ".env.defaults", "example.env"]
+        for filename in env_candidates:
+            path = app_dir / filename
+            if not path.exists():
+                continue
+            content = read(path)
+            match = re.search(r"(?m)^\s*(?:PORT|SERVER_PORT|APP_PORT|VITE_PORT)\s*=\s*['\"]?(\d{2,5})", content)
+            if match:
+                port = int(match.group(1))
+                if valid_port(port):
+                    return port, "high", [f"{filename}: {match.group(0).strip()}"]
+
+        dockerfile = app_dir / "Dockerfile"
+        if dockerfile.exists():
+            content = read(dockerfile)
+            match = re.search(r"(?im)^\s*EXPOSE\s+(\d{2,5})\b", content)
+            if match:
+                port = int(match.group(1))
+                if valid_port(port):
+                    return port, "high", [f"Dockerfile: EXPOSE {port}"]
+
+        package_json = app_dir / "package.json"
+        if package_json.exists():
+            try:
+                package_data = json.loads(package_json.read_text())
+            except (OSError, json.JSONDecodeError):
+                package_data = {}
+            scripts = package_data.get("scripts", {}) if isinstance(package_data, dict) else {}
+            if isinstance(scripts, dict):
+                for name, script in scripts.items():
+                    if not isinstance(script, str):
+                        continue
+                    match = re.search(r"(?:--port|--host\s+\S+\s+--port|-p)\s+(\d{2,5})\b", script)
+                    if not match:
+                        match = re.search(r"\bPORT\s*=\s*(\d{2,5})\b", script)
+                    if match:
+                        port = int(match.group(1))
+                        if valid_port(port):
+                            return port, "medium", [f"package.json script '{name}': {script}"]
+
+        ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
+        source_suffixes = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".php", ".java", ".kt", ".cs"}
+        source_files: list[Path] = []
+        for root, dirs, files in os.walk(app_dir):
+            dirs[:] = [directory for directory in dirs if directory not in ignored_dirs]
+            root_path = Path(root)
+            for filename in files:
+                path = root_path / filename
+                if path.suffix.lower() in source_suffixes:
+                    source_files.append(path)
+
+        source_files.sort(key=lambda path: (0 if path.name.lower() in {"server.ts", "server.js", "index.ts", "index.js", "main.ts", "main.js", "app.ts", "app.js"} else 1, len(path.parts), str(path)))
+        patterns = [
+            re.compile(r"\b(?:app|server|httpServer|httpsServer)\.listen\s*\(\s*(?:process\.env\.PORT\s*(?:\|\||\?\?)\s*)?(\d{2,5})", re.IGNORECASE),
+            re.compile(r"\blisten\s*\(\s*(?:process\.env\.PORT\s*(?:\|\||\?\?)\s*)?(\d{2,5})", re.IGNORECASE),
+            re.compile(r"\bPORT\s*=\s*(?:process\.env\.PORT\s*(?:\|\||\?\?)\s*)?(\d{2,5})", re.IGNORECASE),
+            re.compile(r"\bport\s*[:=]\s*(?:process\.env\.PORT\s*(?:\|\||\?\?)\s*)?(\d{2,5})", re.IGNORECASE),
+            re.compile(r"\b(?:uvicorn|gunicorn).*:(\d{2,5})\b", re.IGNORECASE),
+        ]
+        for path in source_files[:250]:
+            content = read(path)
+            for pattern in patterns:
+                match = pattern.search(content)
+                if match:
+                    port = int(match.group(1))
+                    if valid_port(port):
+                        rel = str(path.relative_to(app_dir))
+                        return port, "medium", [f"{rel}: {match.group(0)[:120]}"]
+
+        if component_type == "frontend":
+            evidence.append("No explicit port found; static Buildpacks web server default is 8080.")
+        else:
+            evidence.append("No explicit port found; platform default is 8080.")
+        return 8080, "default", evidence
 
     @staticmethod
     def _classify_component(app_dir: Path) -> tuple[str, list[str]]:
