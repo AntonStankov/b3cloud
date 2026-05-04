@@ -1557,8 +1557,8 @@ class PlatformCore:
                 process.stdin.write(input_text)
                 process.stdin.close()
             for raw_line in process.stdout:
-                line = raw_line.rstrip()
-                output_chunks.append(raw_line)
+                line = PlatformCore._redact_command_output(raw_line.rstrip(), env)
+                output_chunks.append(line + "\n")
                 if line:
                     stream_callback(line)
             return_code = process.wait()
@@ -1581,7 +1581,31 @@ class PlatformCore:
             stdout = exc.stdout.strip()
             detail_parts = [part for part in (stderr, stdout) if part]
             detail = "\n".join(detail_parts) if detail_parts else str(exc)
-            raise RuntimeError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
+            raise RuntimeError(
+                f"Command failed: {' '.join(cmd)}\n{PlatformCore._redact_command_output(detail, env)}"
+            ) from exc
+
+    @staticmethod
+    def _redact_command_output(line: str, env: Optional[Dict[str, str]]) -> str:
+        if not line:
+            return line
+
+        sensitive_name = re.compile(
+            r"(^|[^A-Z0-9_])([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|PRIVATE|ACCESS_KEY|API_KEY)[A-Z0-9_]*)=",
+            re.IGNORECASE,
+        )
+        if sensitive_name.search(line):
+            return re.sub(r"(=)([^\\s'\";]+)", r"\1[redacted]", line)
+
+        redacted = line
+        for key, value in (env or {}).items():
+            upper_key = key.upper()
+            if not value or len(value) < 8:
+                continue
+            if not any(marker in upper_key for marker in ("SECRET", "TOKEN", "PASSWORD", "PASS", "CREDENTIAL", "PRIVATE", "ACCESS_KEY", "API_KEY")):
+                continue
+            redacted = redacted.replace(value, "[redacted]")
+        return redacted
 
 
 class CloudflareAutomation:

@@ -417,8 +417,8 @@ def _component_communication_env(
             if public_url:
                 env["BACKEND_PUBLIC_URL"] = public_url
                 env["API_PUBLIC_URL"] = public_url
-                env["VITE_BACKEND_URL"] = "/api" if app_public_url else public_url
-                env["VITE_API_URL"] = "/api" if app_public_url else public_url
+                env["VITE_BACKEND_URL"] = "" if app_public_url else public_url
+                env["VITE_API_URL"] = "" if app_public_url else public_url
                 if app_public_url:
                     env["CORS_ORIGIN"] = app_public_url
                     env["APP_PUBLIC_URL"] = app_public_url
