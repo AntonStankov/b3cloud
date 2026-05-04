@@ -104,6 +104,22 @@ class PlatformCore:
     REGISTRY_SECRET_NAME = "registry-creds"
     GIT_SOURCE_SECRET_NAME = "github-basic-auth"
     PACK_BUILDER_IMAGE = os.getenv("B3CLOUD_PACK_BUILDER_IMAGE", "paketobuildpacks/builder-jammy-base")
+    PLATFORM_MANAGED_ENV_NAMES = {
+        "PORT",
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRES_HOST",
+        "MYSQL_URL",
+        "MYSQL_HOST",
+        "MONGODB_URI",
+        "MONGO_URL",
+        "MONGODB_HOST",
+        "REDIS_URL",
+        "REDIS_HOST",
+        "RABBITMQ_URL",
+        "AMQP_URL",
+        "RABBITMQ_HOST",
+    }
 
     def __init__(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
         if kubeconfig:
@@ -448,8 +464,8 @@ class PlatformCore:
     ) -> None:
         labels = {"app": req.app_name}
         env = [client.V1EnvVar(name="PORT", value=str(req.port))]
-        service_env_names = set((generated_env or {}).keys())
-        env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items() if k not in service_env_names)
+        reserved_env_names = self.PLATFORM_MANAGED_ENV_NAMES.union((generated_env or {}).keys())
+        env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items() if k not in reserved_env_names)
         env.extend((generated_env or {}).values())
 
         container = client.V1Container(
