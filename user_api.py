@@ -357,6 +357,7 @@ def _deploy_component(
 def _component_communication_env(component_defaults_list: List[Dict[str, str]]) -> Dict[str, str]:
     env: Dict[str, str] = {}
     index: Dict[str, Dict[str, str]] = {}
+    backend_alias_set = False
     for defaults in component_defaults_list:
         key = _env_key(defaults["component_name"])
         internal_url = f"http://{defaults['app_name']}.{defaults['namespace']}.svc.cluster.local"
@@ -374,7 +375,14 @@ def _component_communication_env(component_defaults_list: List[Dict[str, str]]) 
             env[f"{key}_PUBLIC_URL"] = public_url
             env[f"VITE_{key}_URL"] = public_url
 
-        if key in {"SERVER", "BACKEND", "API"}:
+        is_backend_alias = (
+            defaults.get("component_type") == "backend"
+            or key in {"SERVER", "BACKEND", "API"}
+            or key.endswith("_API")
+            or key.endswith("_SERVER")
+            or key.endswith("_BACKEND")
+        )
+        if is_backend_alias and not backend_alias_set:
             env["BACKEND_URL"] = internal_url
             env["API_URL"] = internal_url
             if public_url:
@@ -382,6 +390,7 @@ def _component_communication_env(component_defaults_list: List[Dict[str, str]]) 
                 env["API_PUBLIC_URL"] = public_url
                 env["VITE_BACKEND_URL"] = public_url
                 env["VITE_API_URL"] = public_url
+            backend_alias_set = True
 
     env["B3_COMPONENTS_JSON"] = json.dumps(index, sort_keys=True)
     return env
