@@ -119,6 +119,13 @@ class PlatformCore:
         "RABBITMQ_URL",
         "AMQP_URL",
         "RABBITMQ_HOST",
+        "API_URL",
+        "BACKEND_URL",
+        "API_PUBLIC_URL",
+        "BACKEND_PUBLIC_URL",
+        "VITE_API_URL",
+        "VITE_BACKEND_URL",
+        "B3_COMPONENTS_JSON",
     }
 
     def __init__(self, kubeconfig: Optional[str] = None, context: Optional[str] = None):
@@ -1121,6 +1128,13 @@ class PlatformCore:
             "RABBITMQ_URL",
             "AMQP_URL",
             "RABBITMQ_HOST",
+            "API_URL",
+            "BACKEND_URL",
+            "API_PUBLIC_URL",
+            "BACKEND_PUBLIC_URL",
+            "VITE_API_URL",
+            "VITE_BACKEND_URL",
+            "B3_COMPONENTS_JSON",
         }
         secret_markers = ("SECRET", "TOKEN", "KEY", "PASSWORD", "PASS", "PRIVATE", "CREDENTIAL", "MONGO", "DATABASE", "REDIS", "RABBIT", "AMQP")
 

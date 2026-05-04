@@ -104,6 +104,7 @@ class UserApi:
             "component_name": component_name,
             "component_path": component.path,
             "component_type": component.type,
+            "public": component.public,
             "app_name": app_name,
             "namespace": namespace,
             "domain": f"{app_name}.{self.cluster_domain}",
@@ -238,10 +239,15 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
 
         results: List[Dict[str, object]] = []
         multi_component = len(components) > 1
+        component_defaults_list = [
+            svc.component_defaults(defaults, component, multi_component)
+            for component in components
+        ]
+        communication_env = _component_communication_env(component_defaults_list)
         for component in components:
             component_defaults = svc.component_defaults(defaults, component, multi_component)
             svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
-            result = _deploy_component(job_id, payload, component, component_defaults)
+            result = _deploy_component(job_id, payload, component, component_defaults, communication_env)
             results.append(result)
         svc.jobs.append_log(job_id, "Deploy job finished successfully.")
         if len(results) == 1:
@@ -268,6 +274,7 @@ def _deploy_component(
     payload: AppDeployIn,
     component: ComponentDeployIn,
     defaults: Dict[str, str],
+    communication_env: Dict[str, str],
 ) -> Dict[str, object]:
     service_requirements: List[ServiceRequirement] = []
     if component.auto_detect_services and component.type in {"backend", "worker"}:
@@ -312,7 +319,7 @@ def _deploy_component(
 
     req = DeploymentRequest(
         github_url=payload.github_url,
-        env={**payload.env, **component.env},
+        env={**payload.env, **component.env, **communication_env},
         resources=ResourceLimits(
             cpu_request=payload.resources.cpu_request,
             cpu_limit=payload.resources.cpu_limit,
@@ -345,6 +352,44 @@ def _deploy_component(
         }
     )
     return result
+
+
+def _component_communication_env(component_defaults_list: List[Dict[str, str]]) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    index: Dict[str, Dict[str, str]] = {}
+    for defaults in component_defaults_list:
+        key = _env_key(defaults["component_name"])
+        internal_url = f"http://{defaults['app_name']}.{defaults['namespace']}.svc.cluster.local"
+        public_url = f"https://{defaults['domain']}" if defaults.get("public") else ""
+        default_url = public_url or internal_url
+        index[key] = {
+            "component": defaults["component_name"],
+            "app_name": defaults["app_name"],
+            "internal_url": internal_url,
+            "public_url": public_url,
+        }
+        env[f"{key}_INTERNAL_URL"] = internal_url
+        env[f"{key}_URL"] = default_url
+        if public_url:
+            env[f"{key}_PUBLIC_URL"] = public_url
+            env[f"VITE_{key}_URL"] = public_url
+
+        if key in {"SERVER", "BACKEND", "API"}:
+            env["BACKEND_URL"] = internal_url
+            env["API_URL"] = internal_url
+            if public_url:
+                env["BACKEND_PUBLIC_URL"] = public_url
+                env["API_PUBLIC_URL"] = public_url
+                env["VITE_BACKEND_URL"] = public_url
+                env["VITE_API_URL"] = public_url
+
+    env["B3_COMPONENTS_JSON"] = json.dumps(index, sort_keys=True)
+    return env
+
+
+def _env_key(value: str) -> str:
+    key = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
+    return key or "APP"
 
 
 def _now() -> str:

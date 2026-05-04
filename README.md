@@ -67,6 +67,8 @@ When auto-detection or a UI checkbox selects one of these services, B3Cloud crea
 
 Repository analysis also detects deployable components in monorepos by scanning common project markers such as `package.json`, `requirements.txt`, `pyproject.toml`, `go.mod`, `pom.xml`, and `Gemfile`. The user UI shows detected frontend, backend, and worker components. Selecting multiple components deploys each one as a separate image and Kubernetes Deployment in the same namespace. Public frontend/backend components get their own derived hostnames; workers are internal-only. Backing services are only auto-provisioned for backend and worker components.
 
+During multi-component deployment, B3Cloud injects component communication variables automatically. Every component receives `<COMPONENT>_URL`, `<COMPONENT>_INTERNAL_URL`, and `B3_COMPONENTS_JSON`. Public components also receive `<COMPONENT>_PUBLIC_URL` and `VITE_<COMPONENT>_URL`. Components named `server`, `backend`, or `api` additionally produce common aliases such as `API_URL`, `BACKEND_URL`, `VITE_API_URL`, and `VITE_BACKEND_URL`.
+
 ### Install
 
 ```bash
