@@ -107,6 +107,7 @@ class UserApi:
             "public": component.public,
             "app_name": app_name,
             "namespace": namespace,
+            "app_domain": defaults["domain"],
             "domain": f"{app_name}.{self.cluster_domain}",
             "registry_repo": defaults["registry_repo"],
         }
@@ -243,12 +244,28 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             svc.component_defaults(defaults, component, multi_component)
             for component in components
         ]
-        communication_env = _component_communication_env(component_defaults_list)
+        same_origin_public = multi_component and _has_public_frontend_backend_pair(component_defaults_list)
+        communication_env = _component_communication_env(
+            component_defaults_list,
+            app_domain=defaults["domain"] if same_origin_public else None,
+        )
         for component in components:
             component_defaults = svc.component_defaults(defaults, component, multi_component)
+            if same_origin_public:
+                component_defaults["deploy_public"] = False
             svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
             result = _deploy_component(job_id, payload, component, component_defaults, communication_env)
             results.append(result)
+        shared_route = None
+        if same_origin_public:
+            shared_route = _ensure_same_origin_public_route(job_id, defaults, component_defaults_list)
+            for result in results:
+                if result.get("component_type") == "frontend":
+                    result["url"] = shared_route["url"]
+                    result["domain"] = defaults["domain"]
+                elif result.get("component_type") == "backend":
+                    result["url"] = shared_route.get("api_url", shared_route["url"])
+                    result["domain"] = defaults["domain"]
         svc.jobs.append_log(job_id, "Deploy job finished successfully.")
         if len(results) == 1:
             svc.jobs.set_result(job_id, results[0])
@@ -259,6 +276,8 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
                 "repo_name": defaults["repo_name"],
                 "namespace": defaults["namespace"],
                 "status": "deployed",
+                "url": shared_route["url"] if shared_route else "",
+                "routes": shared_route["routes"] if shared_route else [],
                 "components": results,
             },
         )
@@ -340,7 +359,7 @@ def _deploy_component(
         port=component.port or payload.port,
         node_arch=payload.node_arch,
         service_requirements=service_requirements,
-        public=component.public,
+        public=bool(defaults.get("deploy_public", component.public)),
     )
     result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
     result.update(
@@ -359,14 +378,19 @@ def _deploy_component(
     return result
 
 
-def _component_communication_env(component_defaults_list: List[Dict[str, str]]) -> Dict[str, str]:
+def _component_communication_env(
+    component_defaults_list: List[Dict[str, str]],
+    app_domain: Optional[str] = None,
+) -> Dict[str, str]:
     env: Dict[str, str] = {}
     index: Dict[str, Dict[str, str]] = {}
     backend_alias_set = False
+    app_public_url = f"https://{app_domain}" if app_domain else ""
+    primary_backend = _primary_backend_component(component_defaults_list)
     for defaults in component_defaults_list:
         key = _env_key(defaults["component_name"])
         internal_url = f"http://{defaults['app_name']}.{defaults['namespace']}.svc.cluster.local"
-        public_url = f"https://{defaults['domain']}" if defaults.get("public") else ""
+        public_url = _component_public_url(defaults, app_public_url, primary_backend)
         default_url = public_url or internal_url
         index[key] = {
             "component": defaults["component_name"],
@@ -393,12 +417,84 @@ def _component_communication_env(component_defaults_list: List[Dict[str, str]]) 
             if public_url:
                 env["BACKEND_PUBLIC_URL"] = public_url
                 env["API_PUBLIC_URL"] = public_url
-                env["VITE_BACKEND_URL"] = public_url
-                env["VITE_API_URL"] = public_url
+                env["VITE_BACKEND_URL"] = "/api" if app_public_url else public_url
+                env["VITE_API_URL"] = "/api" if app_public_url else public_url
+                if app_public_url:
+                    env["CORS_ORIGIN"] = app_public_url
+                    env["APP_PUBLIC_URL"] = app_public_url
             backend_alias_set = True
 
     env["B3_COMPONENTS_JSON"] = json.dumps(index, sort_keys=True)
     return env
+
+
+def _has_public_frontend_backend_pair(component_defaults_list: List[Dict[str, str]]) -> bool:
+    has_frontend = any(item.get("public") and item.get("component_type") == "frontend" for item in component_defaults_list)
+    return has_frontend and _primary_backend_component(component_defaults_list) is not None
+
+
+def _primary_backend_component(component_defaults_list: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    for defaults in component_defaults_list:
+        if defaults.get("component_type") == "backend":
+            return defaults
+    return None
+
+
+def _component_public_url(
+    defaults: Dict[str, str],
+    app_public_url: str,
+    primary_backend: Optional[Dict[str, str]],
+) -> str:
+    if not app_public_url:
+        return f"https://{defaults['domain']}" if defaults.get("public") else ""
+    if defaults.get("component_type") == "frontend":
+        return app_public_url
+    if primary_backend and defaults.get("app_name") == primary_backend.get("app_name"):
+        return f"{app_public_url}/api"
+    if defaults.get("public"):
+        return f"{app_public_url}/{defaults['component_name']}"
+    return ""
+
+
+def _ensure_same_origin_public_route(
+    job_id: str,
+    defaults: Dict[str, str],
+    component_defaults_list: List[Dict[str, str]],
+) -> Dict[str, object]:
+    frontend = next(
+        (item for item in component_defaults_list if item.get("public") and item.get("component_type") == "frontend"),
+        None,
+    )
+    backend = _primary_backend_component(component_defaults_list)
+    routes: List[Dict[str, str]] = []
+    if backend:
+        routes.append({"path": "/api", "service_name": backend["app_name"]})
+    if frontend:
+        routes.append({"path": "/", "service_name": frontend["app_name"]})
+    elif backend:
+        routes.append({"path": "/", "service_name": backend["app_name"]})
+
+    if not routes:
+        return {"url": "", "api_url": "", "routes": []}
+
+    for component in component_defaults_list:
+        if component.get("domain") == defaults["domain"]:
+            continue
+        svc.jobs.append_log(job_id, f"Removing component public route https://{component['domain']} if it exists.")
+        svc.core.delete_public_route(defaults["namespace"], component["app_name"], component["domain"])
+
+    svc.jobs.append_log(job_id, f"Creating same-origin public route https://{defaults['domain']}.")
+    svc.core.create_or_update_shared_public_route(
+        defaults["namespace"],
+        defaults["app_name"],
+        defaults["domain"],
+        routes,
+    )
+    return {
+        "url": f"https://{defaults['domain']}",
+        "api_url": f"https://{defaults['domain']}/api" if backend else "",
+        "routes": routes,
+    }
 
 
 def _env_key(value: str) -> str:

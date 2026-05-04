@@ -125,6 +125,8 @@ class PlatformCore:
         "BACKEND_PUBLIC_URL",
         "VITE_API_URL",
         "VITE_BACKEND_URL",
+        "CORS_ORIGIN",
+        "APP_PUBLIC_URL",
         "B3_COMPONENTS_JSON",
     }
 
@@ -850,9 +852,54 @@ class PlatformCore:
                 raise
 
     def _create_or_update_ingress(self, namespace: str, app_name: str, host: str, service_port: int) -> None:
+        self._create_or_update_path_ingress(
+            namespace,
+            app_name,
+            host,
+            [{"path": "/", "service_name": app_name}],
+        )
+
+    def create_or_update_shared_public_route(
+        self,
+        namespace: str,
+        route_name: str,
+        host: str,
+        routes: list[Dict[str, str]],
+    ) -> None:
+        self._create_or_update_path_ingress(namespace, route_name, host, routes)
+        self.cloudflare.ensure_dns_and_tunnel_route(self.cloudflare_config, host)
+
+    def delete_public_route(self, namespace: str, ingress_name: str, host: str) -> None:
+        try:
+            self.networking.delete_namespaced_ingress(ingress_name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+        self.cloudflare.delete_dns_and_tunnel_route(self.cloudflare_config, host)
+
+    def _create_or_update_path_ingress(
+        self,
+        namespace: str,
+        ingress_name: str,
+        host: str,
+        routes: list[Dict[str, str]],
+    ) -> None:
+        paths = [
+            client.V1HTTPIngressPath(
+                path=route["path"],
+                path_type="Prefix",
+                backend=client.V1IngressBackend(
+                    service=client.V1IngressServiceBackend(
+                        name=route["service_name"],
+                        port=client.V1ServiceBackendPort(number=80),
+                    )
+                ),
+            )
+            for route in routes
+        ]
         body = client.V1Ingress(
             metadata=client.V1ObjectMeta(
-                name=app_name,
+                name=ingress_name,
                 namespace=namespace,
                 annotations={
                     "kubernetes.io/ingress.class": "nginx",
@@ -863,18 +910,7 @@ class PlatformCore:
                     client.V1IngressRule(
                         host=host,
                         http=client.V1HTTPIngressRuleValue(
-                            paths=[
-                                client.V1HTTPIngressPath(
-                                    path="/",
-                                    path_type="Prefix",
-                                    backend=client.V1IngressBackend(
-                                        service=client.V1IngressServiceBackend(
-                                            name=app_name,
-                                            port=client.V1ServiceBackendPort(number=80),
-                                        )
-                                    ),
-                                )
-                            ]
+                            paths=paths
                         ),
                     )
                 ],
@@ -882,8 +918,8 @@ class PlatformCore:
         )
 
         try:
-            self.networking.read_namespaced_ingress(app_name, namespace)
-            self.networking.patch_namespaced_ingress(app_name, namespace, body)
+            self.networking.read_namespaced_ingress(ingress_name, namespace)
+            self.networking.patch_namespaced_ingress(ingress_name, namespace, body)
         except ApiException as exc:
             if exc.status == 404:
                 self.networking.create_namespaced_ingress(namespace, body)
@@ -1557,6 +1593,16 @@ class CloudflareAutomation:
         self._upsert_cname_record(cfg, zone_id, hostname, cname_target)
         self._upsert_tunnel_ingress_rule(cfg, hostname, service or cfg.tunnel_origin_service)
 
+    def delete_dns_and_tunnel_route(self, cfg: CloudflareConfig, hostname: str) -> None:
+        zone_id = self._resolve_zone_id(cfg, hostname)
+        for record_type in ("CNAME", "A"):
+            while True:
+                record = self._find_dns_record(cfg, zone_id, hostname, record_type)
+                if not record:
+                    break
+                self._api_call(cfg.api_token, "DELETE", f"/zones/{zone_id}/dns_records/{record['id']}")
+        self._delete_tunnel_ingress_rule(cfg, hostname)
+
     def _upsert_cname_record(self, cfg: CloudflareConfig, zone_id: str, hostname: str, target: str) -> None:
         existing = self._find_dns_record(cfg, zone_id, hostname, "CNAME")
         payload = {"type": "CNAME", "name": hostname, "content": target, "proxied": True, "ttl": 1}
@@ -1622,6 +1668,26 @@ class CloudflareAutomation:
 
         payload = {"config": {"ingress": filtered}}
         self._api_call(cfg.api_token, "PUT", path, payload)
+
+    def _delete_tunnel_ingress_rule(self, cfg: CloudflareConfig, hostname: str) -> None:
+        path = f"/accounts/{cfg.account_id}/cfd_tunnel/{cfg.tunnel_id}/configurations"
+        current = self._api_call(cfg.api_token, "GET", path).get("result", {})
+        config_obj = current.get("config", {})
+        ingress = config_obj.get("ingress", [])
+
+        filtered = [
+            r
+            for r in ingress
+            if not (isinstance(r, dict) and r.get("hostname") == hostname)
+        ]
+        if filtered == ingress:
+            return
+
+        has_fallback = any(isinstance(r, dict) and r.get("service") == "http_status:404" for r in filtered)
+        if not has_fallback:
+            filtered.append({"service": "http_status:404"})
+
+        self._api_call(cfg.api_token, "PUT", path, {"config": {"ingress": filtered}})
 
     def _api_call(self, api_token: str, method: str, path: str, payload: Optional[Dict] = None) -> Dict:
         body = None
