@@ -47,6 +47,16 @@ class ServiceRequirement:
 
 
 @dataclass
+class EnvRequirement:
+    name: str
+    required: bool
+    source: str
+    evidence: list[str]
+    secret: bool = False
+    platform_managed: bool = False
+
+
+@dataclass
 class DeployableComponent:
     name: str
     path: str
@@ -55,6 +65,7 @@ class DeployableComponent:
     port: int
     port_confidence: str
     port_evidence: list[str]
+    env: list[EnvRequirement]
     services: list[ServiceRequirement]
     evidence: list[str]
 
@@ -1058,6 +1069,7 @@ class PlatformCore:
             name = sanitize_name(path.name if rel != "." else "app") or "app"
             component_type, evidence = cls._classify_component(path)
             port, port_confidence, port_evidence = cls._detect_component_port(path, component_type)
+            env_requirements = cls._detect_env_requirements(path)
             services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
             components.append(
                 DeployableComponent(
@@ -1068,11 +1080,110 @@ class PlatformCore:
                     port=port,
                     port_confidence=port_confidence,
                     port_evidence=port_evidence,
+                    env=env_requirements,
                     services=services,
                     evidence=evidence,
                 )
             )
         return components
+
+    @staticmethod
+    def _detect_env_requirements(app_dir: Path) -> list[EnvRequirement]:
+        env: Dict[str, EnvRequirement] = {}
+        platform_managed_names = {
+            "PORT",
+            "DATABASE_URL",
+            "POSTGRES_URL",
+            "POSTGRES_HOST",
+            "MYSQL_URL",
+            "MYSQL_HOST",
+            "MONGODB_URI",
+            "MONGO_URL",
+            "MONGODB_HOST",
+            "REDIS_URL",
+            "REDIS_HOST",
+            "RABBITMQ_URL",
+            "AMQP_URL",
+            "RABBITMQ_HOST",
+        }
+        secret_markers = ("SECRET", "TOKEN", "KEY", "PASSWORD", "PASS", "PRIVATE", "CREDENTIAL", "MONGO", "DATABASE", "REDIS", "RABBIT", "AMQP")
+
+        def upsert(name: str, required: bool, source: str, evidence: str) -> None:
+            if not re.fullmatch(r"[A-Z_][A-Z0-9_]{1,80}", name):
+                return
+            item = env.get(name)
+            is_secret = any(marker in name for marker in secret_markers)
+            platform_managed = name in platform_managed_names
+            if item:
+                item.required = item.required or required
+                item.secret = item.secret or is_secret
+                item.platform_managed = item.platform_managed or platform_managed
+                if evidence not in item.evidence:
+                    item.evidence.append(evidence)
+                return
+            env[name] = EnvRequirement(
+                name=name,
+                required=required,
+                source=source,
+                evidence=[evidence],
+                secret=is_secret,
+                platform_managed=platform_managed,
+            )
+
+        def read(path: Path, max_bytes: int = 512_000) -> str:
+            try:
+                return path.read_bytes()[:max_bytes].decode("utf-8", errors="ignore")
+            except OSError:
+                return ""
+
+        sample_names = {".env.example", ".env.sample", ".env.defaults", "example.env", ".env.template"}
+        for filename in sample_names:
+            path = app_dir / filename
+            if not path.exists():
+                continue
+            for line in read(path).splitlines():
+                match = re.match(r"^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$", line)
+                if not match:
+                    continue
+                name, raw_value = match.group(1), match.group(2).strip().strip("'\"")
+                required = raw_value == "" or raw_value.lower() in {"changeme", "change_me", "required", "todo", "your_value", "<required>"}
+                upsert(name, required, filename, f"{filename}: {name}={'<empty>' if raw_value == '' else '<provided>'}")
+
+        ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
+        source_suffixes = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".php", ".java", ".kt", ".cs", ".yml", ".yaml", ".json"}
+        patterns = [
+            re.compile(r"process\.env\.([A-Z_][A-Z0-9_]*)"),
+            re.compile(r"os\.getenv\(\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*(?:,\s*([^)]+))?\)"),
+            re.compile(r"os\.environ(?:\.get)?\[\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*\]"),
+            re.compile(r"ENV\[(['\"])([A-Z_][A-Z0-9_]*)\1\]"),
+            re.compile(r"System\.getenv\(\s*['\"]([A-Z_][A-Z0-9_]*)['\"]\s*\)"),
+        ]
+        for root, dirs, files in os.walk(app_dir):
+            dirs[:] = [directory for directory in dirs if directory not in ignored_dirs]
+            root_path = Path(root)
+            for filename in files:
+                path = root_path / filename
+                if path.name in {".env", ".npmrc"} or path.suffix.lower() not in source_suffixes:
+                    continue
+                content = read(path)
+                rel = str(path.relative_to(app_dir))
+                for pattern in patterns:
+                    for match in pattern.finditer(content):
+                        name = match.group(2) if pattern.pattern.startswith("ENV") else match.group(1)
+                        line_start = content.rfind("\n", 0, match.start()) + 1
+                        line_end = content.find("\n", match.end())
+                        line = content[line_start : line_end if line_end != -1 else len(content)].strip()
+                        has_inline_default = bool(re.search(rf"{re.escape(match.group(0))}\s*(?:\|\||\?\?)", line))
+                        required = not has_inline_default and ("getenv" not in match.group(0) or ", " not in match.group(0))
+                        upsert(name, required, rel, f"{rel}: {line[:160]}")
+
+        ordered = sorted(
+            env.values(),
+            key=lambda item: (item.platform_managed, not item.required, item.name),
+        )
+        for item in ordered:
+            item.evidence = item.evidence[:6]
+        return ordered
 
     @staticmethod
     def _detect_component_port(app_dir: Path, component_type: str) -> tuple[int, str, list[str]]:

@@ -340,6 +340,27 @@ th {
   line-height: 1.35;
 }
 
+.component-env {
+  border-top: 1px solid rgba(20, 75, 62, 0.1);
+  padding-top: 10px;
+}
+
+.component-env summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.component-env small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin: 8px 0;
+}
+
+.component-env textarea {
+  min-height: 132px;
+}
+
 .mini-snippet {
   margin: 14px 0 0;
   max-height: 260px;

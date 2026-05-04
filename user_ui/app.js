@@ -227,6 +227,12 @@ function renderComponents(components) {
       const portEvidence = Array.isArray(component.port_evidence) && component.port_evidence.length
         ? component.port_evidence[0]
         : "No port evidence.";
+      const envRequirements = Array.isArray(component.env) ? component.env : [];
+      const userEnv = envRequirements.filter((item) => !item.platform_managed);
+      const envSummary = userEnv.length
+        ? userEnv.map((item) => `${item.name}${item.required ? "*" : ""}`).join(", ")
+        : "none";
+      const envTemplate = Object.fromEntries(userEnv.map((item) => [item.name, ""]));
       return `<article class="component-card">
         <label class="component-main">
           <input type="checkbox" class="component-select" data-index="${index}" ${checked}>
@@ -249,6 +255,11 @@ function renderComponents(components) {
             </select>
           </label>
         </div>
+        <details class="component-env">
+          <summary>Environment variables: ${escapeHtml(envSummary)}</summary>
+          <small>Fill values as JSON. Platform-managed variables like DATABASE_URL and REDIS_URL are generated and override user input.</small>
+          <textarea class="component-env-json" data-index="${index}" rows="6">${escapeHtml(JSON.stringify(envTemplate, null, 2))}</textarea>
+        </details>
       </article>`;
     })
     .join("");
@@ -269,6 +280,8 @@ function selectedDeployComponents() {
     }
     const portInput = document.querySelector(`.component-port[data-index="${input.dataset.index}"]`);
     const publicInput = document.querySelector(`.component-public[data-index="${input.dataset.index}"]`);
+    const envInput = document.querySelector(`.component-env-json[data-index="${input.dataset.index}"]`);
+    const env = parseJsonObject(envInput ? envInput.value : "{}");
     const services = new Set((component.services || []).map((service) => service.type));
     for (const service of globalServices) {
       if (component.type !== "frontend") {
@@ -283,10 +296,22 @@ function selectedDeployComponents() {
       port: portInput ? Number(portInput.value || 8080) : Number(component.port || 8080),
       auto_detect_services: component.type !== "frontend",
       provision_services: Array.from(services),
-      env: {},
+      env,
     });
   });
   return selected;
+}
+
+function parseJsonObject(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) {
+    return {};
+  }
+  const parsed = JSON.parse(trimmed);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Component environment must be a JSON object.");
+  }
+  return parsed;
 }
 
 function escapeHtml(value) {
