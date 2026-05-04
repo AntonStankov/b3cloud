@@ -449,6 +449,8 @@ class PlatformCore:
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
             self._emit_status(status_callback, f"Using app path: {app_dir}.")
+            app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
+            self._prepare_python_start_command(app_dir, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -462,6 +464,8 @@ class PlatformCore:
                 "--verbose",
             ]
             inferred_build_env = self._infer_build_env(app_dir)
+            if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
+                self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
             for key, value in inferred_build_env.items():
                 env[key] = value
                 cmd.extend(["--env", f"{key}={value}"])
@@ -509,6 +513,7 @@ class PlatformCore:
         container = client.V1Container(
             name=req.app_name,
             image=image,
+            image_pull_policy="Always",
             ports=[client.V1ContainerPort(container_port=req.port)],
             env=env,
             resources=client.V1ResourceRequirements(
@@ -527,7 +532,10 @@ class PlatformCore:
         node_selector["kubernetes.io/arch"] = req.node_arch if req.node_arch in {"amd64", "arm64"} else "amd64"
 
         template = client.V1PodTemplateSpec(
-            metadata=client.V1ObjectMeta(labels=labels),
+            metadata=client.V1ObjectMeta(
+                labels=labels,
+                annotations={"b3cloud.io/restarted-at": str(time.time())},
+            ),
             spec=client.V1PodSpec(
                 containers=[container],
                 image_pull_secrets=[client.V1LocalObjectReference(name=self.REGISTRY_SECRET_NAME)],
@@ -1497,6 +1505,136 @@ class PlatformCore:
                 "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
             }
         return {}
+
+    @staticmethod
+    def _prepare_static_frontend_build(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        package_json = app_dir / "package.json"
+        try:
+            package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+
+        scripts = package_data.get("scripts")
+        dependencies = {
+            **package_data.get("dependencies", {}),
+            **package_data.get("devDependencies", {}),
+            **package_data.get("optionalDependencies", {}),
+        }
+        if not isinstance(scripts, dict) or "vite" not in dependencies:
+            return
+
+        build_script = scripts.get("build")
+        if not isinstance(build_script, str):
+            return
+        if "vite build" not in build_script or not re.search(r"\btsc\b", build_script):
+            return
+
+        scripts.setdefault("b3cloud:typecheck", build_script)
+        scripts["build"] = "vite build"
+        package_json.write_text(json.dumps(package_data, indent=2) + "\n")
+        PlatformCore._emit_status(
+            status_callback,
+            "Detected Vite frontend build with TypeScript precheck; using 'vite build' for deployment.",
+        )
+
+    @staticmethod
+    def _prepare_python_start_command(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        procfile = app_dir / "Procfile"
+        if procfile.exists():
+            return
+
+        if (app_dir / "manage.py").exists():
+            wsgi_files = sorted(app_dir.glob("*/wsgi.py"))
+            if wsgi_files:
+                module = wsgi_files[0].parent.name
+                command = (
+                    "web: sh -c 'python manage.py migrate --noinput "
+                    f"&& python -m gunicorn {module}.wsgi:application --bind 0.0.0.0:8000'"
+                )
+                procfile.write_text(command + "\n")
+                PlatformCore._emit_status(
+                    status_callback,
+                    f"Generated Procfile for Django app using {module}.wsgi.",
+                )
+                return
+
+        for candidate in ("main.py", "app.py"):
+            path = app_dir / candidate
+            if not path.exists():
+                continue
+            try:
+                content = path.read_text(errors="ignore")
+            except OSError:
+                continue
+            if re.search(r"\bapp\s*=\s*FastAPI\s*\(", content):
+                module = path.stem
+                procfile.write_text(f"web: python -m uvicorn {module}:app --host 0.0.0.0 --port 8000\n")
+                PlatformCore._emit_status(
+                    status_callback,
+                    f"Generated Procfile for FastAPI app using {module}:app.",
+                )
+                return
+
+    @staticmethod
+    def _prepare_nested_python_component_context(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> Path:
+        for candidate in ("main.py", "app.py"):
+            entrypoint = app_dir / candidate
+            if not entrypoint.exists():
+                continue
+            try:
+                content = entrypoint.read_text(errors="ignore")
+            except OSError:
+                continue
+            if not re.search(r"\bapp\s*=\s*FastAPI\s*\(", content):
+                continue
+            parent_dir = app_dir.parent
+            if not (parent_dir / "manage.py").exists():
+                return app_dir
+            if "DJANGO_SETTINGS_MODULE" not in content and "django.setup" not in content:
+                return app_dir
+
+            relative_entrypoint = entrypoint.relative_to(parent_dir).as_posix()
+            wrapper = parent_dir / "b3cloud_component_app.py"
+            wrapper.write_text(
+                "\n".join(
+                    [
+                        "import importlib.util",
+                        "import sys",
+                        "from pathlib import Path",
+                        "",
+                        "base_dir = Path(__file__).resolve().parent",
+                        "if str(base_dir) not in sys.path:",
+                        "    sys.path.insert(0, str(base_dir))",
+                        f"entrypoint = base_dir / {relative_entrypoint!r}",
+                        "spec = importlib.util.spec_from_file_location('b3cloud_nested_fastapi', entrypoint)",
+                        "module = importlib.util.module_from_spec(spec)",
+                        "sys.modules[spec.name] = module",
+                        "assert spec.loader is not None",
+                        "spec.loader.exec_module(module)",
+                        "app = module.app",
+                        "",
+                    ]
+                )
+            )
+            (parent_dir / "Procfile").write_text(
+                "web: python -m uvicorn b3cloud_component_app:app --host 0.0.0.0 --port 8000\n"
+            )
+            PlatformCore._emit_status(
+                status_callback,
+                f"Detected nested FastAPI component depending on parent Python app; using build context {parent_dir}.",
+            )
+            return parent_dir
+
+        return app_dir
 
     @staticmethod
     def _detect_service_requirements(app_dir: Path) -> list[ServiceRequirement]:
