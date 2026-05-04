@@ -161,7 +161,19 @@ class PlatformCore:
             )
             generated_env = self._provision_backing_services(req.namespace, req.app_name, backing_services)
 
-        output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(req.github_url + req.git_revision + req.app_path)}"
+        image_fingerprint = json.dumps(
+            {
+                "github_url": req.github_url,
+                "git_revision": req.git_revision,
+                "app_path": req.app_path,
+                "env": req.env,
+                "port": req.port,
+                "node_arch": req.node_arch,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(image_fingerprint)}"
         self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
         ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
@@ -471,7 +483,7 @@ class PlatformCore:
     ) -> None:
         labels = {"app": req.app_name}
         env = [client.V1EnvVar(name="PORT", value=str(req.port))]
-        reserved_env_names = self.PLATFORM_MANAGED_ENV_NAMES.union((generated_env or {}).keys())
+        reserved_env_names = {"PORT"}.union((generated_env or {}).keys())
         env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items() if k not in reserved_env_names)
         env.extend((generated_env or {}).values())
 

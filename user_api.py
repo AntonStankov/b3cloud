@@ -317,9 +317,14 @@ def _deploy_component(
             )
         )
 
+    user_env = {
+        key: value
+        for key, value in {**payload.env, **component.env}.items()
+        if key not in PlatformCore.PLATFORM_MANAGED_ENV_NAMES
+    }
     req = DeploymentRequest(
         github_url=payload.github_url,
-        env={**payload.env, **component.env, **communication_env},
+        env={**user_env, **communication_env},
         resources=ResourceLimits(
             cpu_request=payload.resources.cpu_request,
             cpu_limit=payload.resources.cpu_limit,
