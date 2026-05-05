@@ -325,6 +325,107 @@ th {
   background: #aa3324;
 }
 
+.runtime-log-panels {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.runtime-panel {
+  overflow: hidden;
+  border: 1px solid rgba(20, 75, 62, 0.14);
+  border-radius: 18px;
+  background: rgba(255, 252, 242, 0.78);
+}
+
+.runtime-panel.ready {
+  border-color: rgba(29, 107, 88, 0.28);
+}
+
+.runtime-panel.failing {
+  border-color: rgba(170, 51, 36, 0.34);
+  background: rgba(255, 239, 230, 0.64);
+}
+
+.runtime-head,
+.runtime-container-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-head {
+  padding: 14px 16px;
+  background: rgba(20, 75, 62, 0.08);
+}
+
+.runtime-head span {
+  display: grid;
+  gap: 4px;
+}
+
+.runtime-head small,
+.runtime-container-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.runtime-head b {
+  white-space: nowrap;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.runtime-error {
+  margin: 12px 16px;
+  border: 1px solid rgba(170, 51, 36, 0.24);
+  border-radius: 12px;
+  background: rgba(170, 51, 36, 0.1);
+  color: #7e271d;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.runtime-pod {
+  border-top: 1px solid rgba(20, 75, 62, 0.1);
+  padding: 12px 16px;
+}
+
+.runtime-pod summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.runtime-container {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.runtime-container h4 {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.runtime-container pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 14px;
+  background: #101915;
+  color: #d6f5df;
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}
+
 .derived-box {
   border: 1px solid rgba(20, 75, 62, 0.12);
   border-radius: 18px;

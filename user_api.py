@@ -589,6 +589,7 @@ def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None))
     job = svc.jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    _attach_runtime_logs(job)
     return job
 
 
@@ -615,3 +616,222 @@ def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(
         "ready_replicas": str(dep.status.ready_replicas or 0),
         "image": image,
     }
+
+
+@app.get("/apps/{namespace}/{app_name}/runtime-logs")
+def app_runtime_logs(
+    namespace: str,
+    app_name: str,
+    tail_lines: int = Query(default=160, ge=20, le=500),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key)
+    return _runtime_logs_for_component(namespace, app_name, app_name, tail_lines=tail_lines)
+
+
+def _attach_runtime_logs(job: Dict[str, object]) -> None:
+    namespace = str(job.get("namespace") or "")
+    app_name = str(job.get("app_name") or "")
+    if not namespace or not app_name:
+        return
+
+    components = _job_runtime_components(job)
+    runtime_logs = [
+        _runtime_logs_for_component(
+            namespace,
+            str(component["app_name"]),
+            str(component["component_name"]),
+            tail_lines=160,
+        )
+        for component in components
+    ]
+    job["runtime_logs"] = runtime_logs
+
+
+def _job_runtime_components(job: Dict[str, object]) -> List[Dict[str, str]]:
+    result = job.get("result")
+    if isinstance(result, dict):
+        result_components = result.get("components")
+        if isinstance(result_components, list) and result_components:
+            components = []
+            for item in result_components:
+                if not isinstance(item, dict):
+                    continue
+                app_name = str(item.get("app_name") or "")
+                component_name = str(item.get("component_name") or app_name)
+                if app_name:
+                    components.append({"app_name": app_name, "component_name": component_name})
+            if components:
+                return components
+        result_app_name = str(result.get("app_name") or "")
+        if result_app_name:
+            return [{"app_name": result_app_name, "component_name": str(result.get("component_name") or result_app_name)}]
+
+    raw_components = job.get("components")
+    if isinstance(raw_components, list) and raw_components:
+        multi_component = len(raw_components) > 1
+        defaults = {
+            "repo_name": str(job.get("app_name") or ""),
+            "app_name": str(job.get("app_name") or ""),
+            "namespace": str(job.get("namespace") or ""),
+            "domain": str(job.get("domain") or ""),
+            "registry_repo": str(job.get("registry_repo") or ""),
+        }
+        components = []
+        for item in raw_components:
+            if not isinstance(item, dict):
+                continue
+            try:
+                component = ComponentDeployIn(**item)
+            except Exception:
+                continue
+            component_defaults = svc.component_defaults(defaults, component, multi_component)
+            components.append(
+                {
+                    "app_name": component_defaults["app_name"],
+                    "component_name": component_defaults["component_name"],
+                }
+            )
+        if components:
+            return components
+
+    if job.get("app_name"):
+        return [{"app_name": str(job["app_name"]), "component_name": str(job["app_name"])}]
+    return []
+
+
+def _runtime_logs_for_component(
+    namespace: str,
+    app_name: str,
+    component_name: str,
+    tail_lines: int = 160,
+) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "namespace": namespace,
+        "app_name": app_name,
+        "component_name": component_name,
+        "status": "unknown",
+        "ready_replicas": 0,
+        "replicas": 0,
+        "pods": [],
+        "error_summary": "",
+    }
+
+    try:
+        dep = svc.core.apps.read_namespaced_deployment(app_name, namespace)
+        payload["replicas"] = dep.spec.replicas or 0
+        payload["ready_replicas"] = dep.status.ready_replicas or 0
+        payload["status"] = "ready" if (dep.status.ready_replicas or 0) >= (dep.spec.replicas or 0) else "not_ready"
+    except ApiException as exc:
+        if exc.status == 404:
+            payload["status"] = "not_deployed"
+            payload["error_summary"] = "Deployment does not exist yet."
+            return payload
+        payload["status"] = "error"
+        payload["error_summary"] = f"Kubernetes deployment lookup failed: {exc}"
+        return payload
+
+    try:
+        pods = svc.core.core.list_namespaced_pod(namespace, label_selector=f"app={app_name}").items
+    except ApiException as exc:
+        payload["status"] = "error"
+        payload["error_summary"] = f"Kubernetes pod lookup failed: {exc}"
+        return payload
+
+    pod_payloads: List[Dict[str, object]] = []
+    summaries: List[str] = []
+    for pod in pods:
+        pod_info: Dict[str, object] = {
+            "name": pod.metadata.name,
+            "phase": pod.status.phase,
+            "containers": [],
+        }
+        for container_status in pod.status.container_statuses or []:
+            state = _container_state(container_status)
+            ready = bool(container_status.ready)
+            restarts = int(container_status.restart_count or 0)
+            current_logs = _read_pod_log(namespace, pod.metadata.name, container_status.name, tail_lines, previous=False)
+            previous_logs = _read_pod_log(namespace, pod.metadata.name, container_status.name, tail_lines, previous=True)
+            error_line = _first_error_line(current_logs) or _first_error_line(previous_logs)
+            if error_line:
+                summaries.append(f"{pod.metadata.name}/{container_status.name}: {error_line}")
+            elif not ready and state:
+                summaries.append(f"{pod.metadata.name}/{container_status.name}: {state}")
+
+            pod_info["containers"].append(
+                {
+                    "name": container_status.name,
+                    "ready": ready,
+                    "restarts": restarts,
+                    "state": state,
+                    "current_logs": current_logs,
+                    "previous_logs": previous_logs,
+                    "error_line": error_line,
+                }
+            )
+        pod_payloads.append(pod_info)
+
+    payload["pods"] = pod_payloads
+    if summaries:
+        payload["status"] = "failing"
+        payload["error_summary"] = summaries[0]
+    elif not pods:
+        payload["status"] = "pending"
+        payload["error_summary"] = "No pods exist for this component yet."
+    return payload
+
+
+def _read_pod_log(namespace: str, pod_name: str, container_name: str, tail_lines: int, previous: bool) -> str:
+    try:
+        return svc.core.core.read_namespaced_pod_log(
+            name=pod_name,
+            namespace=namespace,
+            container=container_name,
+            tail_lines=tail_lines,
+            previous=previous,
+        )
+    except ApiException as exc:
+        if exc.status in {400, 404}:
+            return ""
+        return f"Failed to read pod logs: {exc}"
+    except Exception as exc:
+        return f"Failed to read pod logs: {exc}"
+
+
+def _container_state(container_status) -> str:
+    state = container_status.state
+    last_state = container_status.last_state
+    if state and state.waiting:
+        message = state.waiting.message or state.waiting.reason or "waiting"
+        return f"waiting: {message}"
+    if state and state.terminated:
+        message = state.terminated.message or state.terminated.reason or "terminated"
+        return f"terminated: {message} (exit {state.terminated.exit_code})"
+    if state and state.running:
+        return "running"
+    if last_state and last_state.terminated:
+        message = last_state.terminated.message or last_state.terminated.reason or "terminated"
+        return f"last terminated: {message} (exit {last_state.terminated.exit_code})"
+    return ""
+
+
+def _first_error_line(*logs: str) -> str:
+    patterns = (
+        "error",
+        "exception",
+        "traceback",
+        "econnrefused",
+        "module not found",
+        "cannot find module",
+        "failed",
+        "fatal",
+    )
+    for log_text in logs:
+        for line in str(log_text or "").splitlines():
+            normalized = line.strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if any(pattern in lowered for pattern in patterns):
+                return normalized[:500]
+    return ""

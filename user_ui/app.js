@@ -8,6 +8,7 @@ const deployState = document.getElementById("deploy-state");
 const deployPercent = document.getElementById("deploy-percent");
 const deployProgressFill = document.getElementById("deploy-progress-fill");
 const deployTimeline = document.getElementById("deploy-timeline");
+const runtimeLogPanels = document.getElementById("runtime-log-panels");
 let activeJobId = null;
 let lastJobFingerprint = null;
 let latestAnalysis = null;
@@ -116,6 +117,7 @@ async function pollJob(jobId) {
     const job = await api(`/deploy-jobs/${encodeURIComponent(jobId)}`);
     statusOutput.textContent = JSON.stringify(job, null, 2);
     renderDeployProgress(job);
+    renderRuntimeLogs(job.runtime_logs || []);
     const fingerprint = JSON.stringify({
       status: job.status,
       updated_at: job.updated_at,
@@ -188,6 +190,7 @@ async function deployApp(event) {
   });
   statusOutput.textContent = JSON.stringify(job, null, 2);
   renderDeployProgress(job);
+  renderRuntimeLogs(job.runtime_logs || []);
   log("Deploy queued", job);
   await pollJob(job.job_id);
 }
@@ -249,6 +252,71 @@ function renderDeployProgress(job) {
   if (!deployTimeline.innerHTML) {
     deployTimeline.innerHTML = `<li class="pending">No deployment started.</li>`;
   }
+}
+
+function renderRuntimeLogs(runtimeLogs) {
+  if (!runtimeLogPanels) {
+    return;
+  }
+  if (!Array.isArray(runtimeLogs) || !runtimeLogs.length) {
+    runtimeLogPanels.innerHTML = `<p class="muted">Runtime container logs will appear here after deployment starts.</p>`;
+    return;
+  }
+
+  runtimeLogPanels.innerHTML = runtimeLogs
+    .map((component) => {
+      const status = String(component.status || "unknown");
+      const pods = Array.isArray(component.pods) ? component.pods : [];
+      const podMarkup = pods.length
+        ? pods.map((pod) => renderPodLogs(pod)).join("")
+        : `<p class="muted">No pods found for this component yet.</p>`;
+      const summary = component.error_summary
+        ? `<div class="runtime-error">${escapeHtml(component.error_summary)}</div>`
+        : "";
+      return `<article class="runtime-panel ${status === "ready" ? "ready" : status === "failing" ? "failing" : ""}">
+        <div class="runtime-head">
+          <span>
+            <strong>${escapeHtml(component.component_name || component.app_name || "component")}</strong>
+            <small>${escapeHtml(component.namespace || "")}/${escapeHtml(component.app_name || "")}</small>
+          </span>
+          <b>${escapeHtml(status)} · ${Number(component.ready_replicas || 0)}/${Number(component.replicas || 0)} ready</b>
+        </div>
+        ${summary}
+        ${podMarkup}
+      </article>`;
+    })
+    .join("");
+}
+
+function renderPodLogs(pod) {
+  const containers = Array.isArray(pod.containers) ? pod.containers : [];
+  const containerMarkup = containers.length
+    ? containers.map((container) => renderContainerLogs(container)).join("")
+    : `<p class="muted">No container status available.</p>`;
+  return `<details class="runtime-pod" open>
+    <summary>${escapeHtml(pod.name || "pod")} · ${escapeHtml(pod.phase || "unknown")}</summary>
+    ${containerMarkup}
+  </details>`;
+}
+
+function renderContainerLogs(container) {
+  const currentLogs = String(container.current_logs || "").trim();
+  const previousLogs = String(container.previous_logs || "").trim();
+  const current = currentLogs || "No current logs.";
+  const previous = previousLogs ? `<h4>Previous crash logs</h4><pre>${escapeHtml(previousLogs)}</pre>` : "";
+  const errorLine = container.error_line
+    ? `<div class="runtime-error">${escapeHtml(container.error_line)}</div>`
+    : "";
+  return `<section class="runtime-container">
+    <div class="runtime-container-head">
+      <strong>${escapeHtml(container.name || "container")}</strong>
+      <span>${container.ready ? "ready" : "not ready"} · restarts ${Number(container.restarts || 0)} · ${escapeHtml(container.state || "unknown")}</span>
+    </div>
+    ${errorLine}
+    <h4>Current logs</h4>
+    <pre>${escapeHtml(current)}</pre>
+    ${previous}
+  </section>`;
 }
 
 function statusLabel(status) {
@@ -420,6 +488,13 @@ async function fetchStatus(event) {
   const appName = sanitizeName(repoName);
   const data = await api(`/apps/${encodeURIComponent(namespace)}/${encodeURIComponent(appName)}`);
   statusOutput.textContent = JSON.stringify(data, null, 2);
+  try {
+    const runtime = await api(`/apps/${encodeURIComponent(namespace)}/${encodeURIComponent(appName)}/runtime-logs`);
+    renderRuntimeLogs([runtime]);
+  } catch (error) {
+    renderRuntimeLogs([]);
+    log("Runtime logs failed", String(error));
+  }
   log("App Status", data);
 }
 
@@ -488,6 +563,7 @@ bindClick("analyze-repo", analyzeRepo);
 apiKeyInput.value = getApiKey();
 setApiKeyBanner();
 renderDeployProgress({ status: "idle", logs: [] });
+renderRuntimeLogs([]);
 
 if (getApiKey()) {
   refreshAll().catch((error) => log("Initial refresh failed", String(error)));
