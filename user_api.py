@@ -8,16 +8,23 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
+import hmac
+import secrets
 import threading
 import time
 import traceback
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.parse import urlencode
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from kubernetes import client
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 
@@ -61,6 +68,38 @@ class RepoAnalyzeIn(BaseModel):
     git_revision: str = "main"
 
 
+class SignupIn(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class GitHubLinkIn(BaseModel):
+    github_url: str
+    installation_id: Optional[str] = None
+
+
+class DeploymentUpdateIn(BaseModel):
+    env: Optional[Dict[str, str]] = None
+    git_revision: Optional[str] = None
+    port: Optional[int] = None
+    components: Optional[List[ComponentDeployIn]] = None
+    redeploy_services: Optional[bool] = None
+
+
+class DeploymentDeleteIn(BaseModel):
+    delete_data: bool = False
+
+
+class ScaleIn(BaseModel):
+    replicas: int = Field(ge=0, le=10)
+
+
 class UserApi:
     def __init__(self) -> None:
         self.api_key = os.getenv("B3CLOUD_USER_API_KEY", "")
@@ -71,6 +110,7 @@ class UserApi:
         self.registry_namespace = os.getenv("B3CLOUD_REGISTRY_NAMESPACE", self.registry_username.lower())
         self.core = PlatformCore(kubeconfig=kubeconfig)
         self.jobs = DeployJobStore()
+        self.accounts = AccountStore()
 
     def auth(self, x_api_key: Optional[str]) -> None:
         if not self.api_key:
@@ -220,6 +260,189 @@ class DeployJobStore:
             return
         ordered = sorted(self._jobs.items(), key=lambda item: str(item[1].get("created_at", "")), reverse=True)
         self._jobs = dict(ordered[:100])
+
+
+class AccountStore:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._path = Path(__file__).with_name("data") / "user_accounts.json"
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._users: Dict[str, Dict[str, object]] = {}
+        self._sessions: Dict[str, Dict[str, object]] = {}
+        self._repo_links: Dict[str, Dict[str, object]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if not self._path.exists():
+            return
+        try:
+            payload = json.loads(self._path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        if isinstance(payload, dict):
+            self._users = payload.get("users", {}) if isinstance(payload.get("users"), dict) else {}
+            self._sessions = payload.get("sessions", {}) if isinstance(payload.get("sessions"), dict) else {}
+            self._repo_links = payload.get("repo_links", {}) if isinstance(payload.get("repo_links"), dict) else {}
+
+    def _persist(self) -> None:
+        self._path.write_text(
+            json.dumps(
+                {
+                    "users": self._users,
+                    "sessions": self._sessions,
+                    "repo_links": self._repo_links,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+
+    def create_user(self, email: str, password: str, name: str = "") -> Dict[str, object]:
+        normalized = email.strip().lower()
+        if not normalized or "@" not in normalized:
+            raise HTTPException(status_code=400, detail="A valid email is required")
+        if len(password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        with self._lock:
+            if any(user.get("email") == normalized for user in self._users.values()):
+                raise HTTPException(status_code=409, detail="Account already exists")
+            user_id = uuid.uuid4().hex
+            user = {
+                "id": user_id,
+                "email": normalized,
+                "name": name.strip(),
+                "password_hash": self._hash_password(password),
+                "github": {},
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            self._users[user_id] = user
+            self._persist()
+            return self._public_user(user)
+
+    def authenticate(self, email: str, password: str) -> Dict[str, object]:
+        normalized = email.strip().lower()
+        with self._lock:
+            for user in self._users.values():
+                if user.get("email") == normalized and self._verify_password(password, str(user.get("password_hash") or "")):
+                    return self._public_user(user)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    def create_session(self, user_id: str) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            self._sessions[token] = {
+                "user_id": user_id,
+                "created_at": _now(),
+                "updated_at": _now(),
+            }
+            self._persist()
+        return token
+
+    def delete_session(self, token: str) -> None:
+        if not token:
+            return
+        with self._lock:
+            self._sessions.pop(token, None)
+            self._persist()
+
+    def user_for_token(self, token: str) -> Optional[Dict[str, object]]:
+        if not token:
+            return None
+        with self._lock:
+            session = self._sessions.get(token)
+            if not session:
+                return None
+            user = self._users.get(str(session.get("user_id") or ""))
+            if not user:
+                return None
+            session["updated_at"] = _now()
+            self._persist()
+            return self._public_user(user)
+
+    def link_github_identity(self, email: str, github_payload: Dict[str, object]) -> Dict[str, object]:
+        normalized = email.strip().lower()
+        with self._lock:
+            user_id = ""
+            user: Optional[Dict[str, object]] = None
+            for candidate_id, candidate in self._users.items():
+                if candidate.get("email") == normalized:
+                    user_id = candidate_id
+                    user = candidate
+                    break
+            if not user:
+                user_id = uuid.uuid4().hex
+                user = {
+                    "id": user_id,
+                    "email": normalized,
+                    "name": str(github_payload.get("name") or ""),
+                    "password_hash": "",
+                    "github": {},
+                    "created_at": _now(),
+                    "updated_at": _now(),
+                }
+                self._users[user_id] = user
+            user["github"] = github_payload
+            user["updated_at"] = _now()
+            self._persist()
+            return self._public_user(user)
+
+    def link_repo(self, user_id: str, payload: GitHubLinkIn) -> Dict[str, object]:
+        defaults = svc.defaults_from_github_url(payload.github_url)
+        deployment_id = _deployment_id(defaults["namespace"], defaults["app_name"])
+        link = {
+            "deployment_id": deployment_id,
+            "user_id": user_id,
+            "github_url": payload.github_url,
+            "installation_id": payload.installation_id or "",
+            "namespace": defaults["namespace"],
+            "app_name": defaults["app_name"],
+            "domain": defaults["domain"],
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        with self._lock:
+            self._repo_links[deployment_id] = link
+            self._persist()
+        return dict(link)
+
+    def repo_links_for_user(self, user_id: str) -> List[Dict[str, object]]:
+        with self._lock:
+            links = [dict(link) for link in self._repo_links.values() if link.get("user_id") == user_id]
+        links.sort(key=lambda link: str(link.get("created_at", "")), reverse=True)
+        return links
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 200_000).hex()
+        return f"pbkdf2_sha256${salt}${digest}"
+
+    @staticmethod
+    def _verify_password(password: str, password_hash: str) -> bool:
+        try:
+            algorithm, salt, expected = password_hash.split("$", 2)
+        except ValueError:
+            return False
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 200_000).hex()
+        return hmac.compare_digest(digest, expected)
+
+    @staticmethod
+    def _public_user(user: Dict[str, object]) -> Dict[str, object]:
+        github = dict(user.get("github") or {})
+        if "access_token" in github:
+            github["linked"] = True
+            github.pop("access_token", None)
+        return {
+            "id": user.get("id"),
+            "email": user.get("email"),
+            "name": user.get("name") or "",
+            "github": github,
+            "created_at": user.get("created_at"),
+            "updated_at": user.get("updated_at"),
+        }
 
 
 def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str]) -> None:
@@ -531,6 +754,478 @@ def user_frontend() -> FileResponse:
     return FileResponse(index_path)
 
 
+@app.post("/api/v1/auth/signup")
+def v1_signup(payload: SignupIn, response: Response) -> Dict[str, object]:
+    user = svc.accounts.create_user(payload.email, payload.password, payload.name)
+    token = svc.accounts.create_session(str(user["id"]))
+    _set_session_cookie(response, token)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+
+@app.post("/api/v1/auth/login")
+def v1_login(payload: LoginIn, response: Response) -> Dict[str, object]:
+    user = svc.accounts.authenticate(payload.email, payload.password)
+    token = svc.accounts.create_session(str(user["id"]))
+    _set_session_cookie(response, token)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+
+@app.post("/api/v1/auth/logout")
+def v1_logout(request: Request, response: Response) -> Dict[str, str]:
+    token = _session_token(request)
+    svc.accounts.delete_session(token)
+    response.delete_cookie("b3cloud_session")
+    return {"status": "logged_out"}
+
+
+@app.get("/api/v1/auth/me")
+def v1_me(request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    return {"user": _require_user(request, x_api_key)}
+
+
+@app.get("/api/v1/auth/github/start")
+def v1_github_login_start() -> Dict[str, str]:
+    client_id = os.getenv("B3CLOUD_GITHUB_CLIENT_ID", "")
+    redirect_uri = os.getenv("B3CLOUD_GITHUB_REDIRECT_URI", "")
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=501, detail="GitHub OAuth is not configured")
+    state = secrets.token_urlsafe(24)
+    params = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "scope": "read:user user:email",
+            "state": state,
+        }
+    )
+    return {"url": f"https://github.com/login/oauth/authorize?{params}", "state": state}
+
+
+@app.get("/api/v1/auth/github/callback")
+def v1_github_login_callback(
+    response: Response,
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+) -> Dict[str, object]:
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing GitHub OAuth code")
+    client_id = os.getenv("B3CLOUD_GITHUB_CLIENT_ID", "")
+    client_secret = os.getenv("B3CLOUD_GITHUB_CLIENT_SECRET", "")
+    redirect_uri = os.getenv("B3CLOUD_GITHUB_REDIRECT_URI", "")
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=501, detail="GitHub OAuth is not configured")
+
+    token_payload = _github_request(
+        "https://github.com/login/oauth/access_token",
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "state": state,
+        },
+    )
+    access_token = str(token_payload.get("access_token") or "")
+    if not access_token:
+        raise HTTPException(status_code=401, detail=f"GitHub OAuth failed: {token_payload}")
+
+    github_user = _github_request("https://api.github.com/user", token=access_token)
+    github_emails = _github_request("https://api.github.com/user/emails", token=access_token)
+    email = str(github_user.get("email") or "")
+    if not email and isinstance(github_emails, list):
+        primary = next((item for item in github_emails if item.get("primary")), None) or (github_emails[0] if github_emails else {})
+        email = str(primary.get("email") or "")
+    if not email:
+        raise HTTPException(status_code=400, detail="GitHub account did not provide an email address")
+
+    user = svc.accounts.link_github_identity(
+        email,
+        {
+            "id": github_user.get("id"),
+            "login": github_user.get("login"),
+            "name": github_user.get("name") or github_user.get("login") or "",
+            "avatar_url": github_user.get("avatar_url") or "",
+            "access_token": access_token,
+            "linked_at": _now(),
+        },
+    )
+    token = svc.accounts.create_session(str(user["id"]))
+    _set_session_cookie(response, token)
+    return {"user": user, "access_token": token, "token_type": "bearer"}
+
+
+@app.get("/api/v1/github/access/request")
+def v1_github_access_request(request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, str]:
+    _require_user(request, x_api_key)
+    install_url = os.getenv("B3CLOUD_GITHUB_APP_INSTALL_URL", "")
+    app_slug = os.getenv("B3CLOUD_GITHUB_APP_SLUG", "")
+    if not install_url and app_slug:
+        install_url = f"https://github.com/apps/{app_slug}/installations/new"
+    if not install_url:
+        raise HTTPException(status_code=501, detail="GitHub App install URL is not configured")
+    return {"url": install_url}
+
+
+@app.get("/api/v1/github/installations")
+def v1_github_installations(request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
+    user = _require_user(request, x_api_key)
+    github = user.get("github") if isinstance(user, dict) else {}
+    installation_id = str((github or {}).get("installation_id") or "")
+    return [{"installation_id": installation_id}] if installation_id else []
+
+
+@app.get("/api/v1/github/repos")
+def v1_github_repos(request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
+    user = _require_user(request, x_api_key)
+    return svc.accounts.repo_links_for_user(str(user["id"]))
+
+
+@app.get("/api/v1/github/repos/{owner}/{repo}/branches")
+def v1_github_repo_branches(
+    owner: str,
+    repo: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, str]]:
+    _require_user(request, x_api_key)
+    return [{"name": "main"}, {"name": "master"}]
+
+
+@app.post("/api/v1/github/link")
+def v1_github_link(
+    payload: GitHubLinkIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    user = _require_user(request, x_api_key)
+    return svc.accounts.link_repo(str(user["id"]), payload)
+
+
+@app.post("/api/v1/github/repos/analyze")
+def v1_analyze_repo(
+    payload: RepoAnalyzeIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return analyze_app(payload, x_api_key=svc.api_key)
+
+
+@app.get("/api/v1/deployments")
+def v1_list_deployments(
+    request: Request,
+    namespace: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    _require_user(request, x_api_key)
+    return _list_deployments(namespace)
+
+
+@app.post("/api/v1/deployments")
+def v1_create_deployment(
+    payload: AppDeployIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    job = deploy_app(payload, x_api_key=svc.api_key)
+    job["deployment_id"] = _deployment_id(str(job["namespace"]), str(job["app_name"]))
+    return job
+
+
+@app.get("/api/v1/deployments/{deployment_id}")
+def v1_get_deployment(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    return _deployment_detail(namespace, app_name)
+
+
+@app.patch("/api/v1/deployments/{deployment_id}")
+def v1_update_deployment(
+    deployment_id: str,
+    payload: DeploymentUpdateIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    return {
+        "deployment_id": deployment_id,
+        "namespace": namespace,
+        "app_name": app_name,
+        "status": "config_accepted",
+        "detail": "Persisted deployment config storage is not implemented yet; send the updated config to redeploy.",
+        "config": payload.model_dump(exclude_none=True),
+    }
+
+
+@app.delete("/api/v1/deployments/{deployment_id}")
+def v1_delete_deployment(
+    deployment_id: str,
+    request: Request,
+    payload: DeploymentDeleteIn = DeploymentDeleteIn(),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    _delete_application(namespace, app_name, delete_data=payload.delete_data)
+    return {"deployment_id": deployment_id, "namespace": namespace, "app_name": app_name, "status": "deleted"}
+
+
+@app.post("/api/v1/deployments/{deployment_id}/redeploy")
+def v1_redeploy(
+    deployment_id: str,
+    payload: AppDeployIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return v1_create_deployment(payload, request, x_api_key)
+
+
+@app.post("/api/v1/deployments/{deployment_id}/rollback")
+def v1_rollback(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    raise HTTPException(status_code=409, detail="Rollback requires retaining previous releases; old releases are currently cleaned after successful switch")
+
+
+@app.post("/api/v1/deployments/{deployment_id}/stop")
+def v1_stop_deployment(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    deployment_name = _active_app_deployment(namespace, app_name).metadata.name
+    _scale_deployment(namespace, deployment_name, 0)
+    return {"deployment_id": deployment_id, "status": "stopped"}
+
+
+@app.post("/api/v1/deployments/{deployment_id}/start")
+def v1_start_deployment(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    deployment_name = _active_app_deployment(namespace, app_name).metadata.name
+    _scale_deployment(namespace, deployment_name, 1)
+    return {"deployment_id": deployment_id, "status": "started"}
+
+
+@app.get("/api/v1/deployments/{deployment_id}/jobs")
+def v1_deployment_jobs(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    return [
+        job
+        for job in svc.jobs.list_jobs()
+        if str(job.get("namespace") or "") == namespace and str(job.get("app_name") or "") == app_name
+    ]
+
+
+@app.get("/api/v1/deploy-jobs")
+def v1_list_deploy_jobs(request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
+    _require_user(request, x_api_key)
+    return svc.jobs.list_jobs()
+
+
+@app.get("/api/v1/deploy-jobs/{job_id}")
+def v1_get_deploy_job(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return get_deploy_job(job_id, x_api_key=svc.api_key)
+
+
+@app.get("/api/v1/deploy-jobs/{job_id}/events")
+def v1_deploy_job_events(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> StreamingResponse:
+    _require_user(request, x_api_key)
+
+    def event_stream():
+        sent = 0
+        terminal = {"succeeded", "failed", "cancelled"}
+        while True:
+            job = svc.jobs.get_job(job_id)
+            if not job:
+                yield "event: error\ndata: Deploy job not found\n\n"
+                return
+            logs = list(job.get("logs", []))
+            for line in logs[sent:]:
+                yield f"event: log\ndata: {json.dumps({'message': line})}\n\n"
+            sent = len(logs)
+            yield f"event: status\ndata: {json.dumps({'status': job.get('status'), 'updated_at': job.get('updated_at')})}\n\n"
+            if str(job.get("status")) in terminal:
+                yield f"event: done\ndata: {json.dumps(job)}\n\n"
+                return
+            time.sleep(2)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/api/v1/deploy-jobs/{job_id}/cancel")
+def v1_cancel_deploy_job(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    job = svc.jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    if str(job.get("status")) not in {"queued"}:
+        raise HTTPException(status_code=409, detail="Only queued jobs can be cancelled")
+    svc.jobs.set_status(job_id, "cancelled")
+    svc.jobs.append_log(job_id, "Deploy job cancelled by user.")
+    return svc.jobs.get_job(job_id) or {}
+
+
+@app.get("/api/v1/deployments/{deployment_id}/components")
+def v1_deployment_components(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    return _deployment_components(namespace, app_name)
+
+
+@app.get("/api/v1/deployments/{deployment_id}/components/{component_id}")
+def v1_deployment_component(
+    deployment_id: str,
+    component_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, _ = _parse_deployment_id(deployment_id)
+    return _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=80)
+
+
+@app.post("/api/v1/deployments/{deployment_id}/components/{component_id}/restart")
+def v1_restart_component(
+    deployment_id: str,
+    component_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, _ = _parse_deployment_id(deployment_id)
+    dep = _active_app_deployment(namespace, component_id)
+    svc.core.apps.patch_namespaced_deployment(
+        dep.metadata.name,
+        namespace,
+        {"spec": {"template": {"metadata": {"annotations": {"b3cloud.io/restarted-at": _now()}}}}},
+    )
+    return {"deployment_id": deployment_id, "component_id": component_id, "status": "restarted"}
+
+
+@app.get("/api/v1/deployments/{deployment_id}/components/{component_id}/runtime-logs")
+def v1_component_runtime_logs(
+    deployment_id: str,
+    component_id: str,
+    request: Request,
+    tail_lines: int = Query(default=160, ge=20, le=500),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, _ = _parse_deployment_id(deployment_id)
+    return _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=tail_lines)
+
+
+@app.get("/api/v1/deployments/{deployment_id}/components/{component_id}/pods")
+def v1_component_pods(
+    deployment_id: str,
+    component_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    _require_user(request, x_api_key)
+    namespace, _ = _parse_deployment_id(deployment_id)
+    logs = _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=80)
+    return list(logs.get("pods", []))
+
+
+@app.get("/api/v1/deployments/{deployment_id}/components/{component_id}/pods/{pod_name}/containers/{container_name}/logs")
+def v1_component_container_logs(
+    deployment_id: str,
+    component_id: str,
+    pod_name: str,
+    container_name: str,
+    request: Request,
+    tail_lines: int = Query(default=200, ge=20, le=1000),
+    previous: bool = Query(default=False),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, _ = _parse_deployment_id(deployment_id)
+    return app_container_logs(namespace, component_id, pod_name, container_name, tail_lines, previous, x_api_key=svc.api_key)
+
+
+@app.get("/api/v1/deployments/{deployment_id}/logs")
+def v1_deployment_logs(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    jobs = v1_deployment_jobs(deployment_id, request, x_api_key=x_api_key)
+    return {
+        "deployment_id": deployment_id,
+        "namespace": namespace,
+        "app_name": app_name,
+        "jobs": jobs,
+        "logs": [line for job in jobs for line in list(job.get("logs", []))],
+    }
+
+
+@app.get("/api/v1/deployments/{deployment_id}/env")
+def v1_deployment_env(deployment_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return {"deployment_id": deployment_id, "env": [], "detail": "Environment persistence API is reserved for the frontend config store."}
+
+
+@app.put("/api/v1/deployments/{deployment_id}/env")
+@app.patch("/api/v1/deployments/{deployment_id}/env")
+def v1_update_deployment_env(
+    deployment_id: str,
+    payload: Dict[str, str],
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return {"deployment_id": deployment_id, "status": "accepted", "env": {key: "***" for key in payload}}
+
+
+@app.post("/api/v1/deployments/{deployment_id}/secrets")
+def v1_update_deployment_secrets(
+    deployment_id: str,
+    payload: Dict[str, str],
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    _require_user(request, x_api_key)
+    return {"deployment_id": deployment_id, "status": "accepted", "secrets": list(payload.keys())}
+
+
+@app.get("/api/v1/deployments/{deployment_id}/domains")
+def v1_deployment_domains(deployment_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, str]]:
+    _require_user(request, x_api_key)
+    detail = v1_get_deployment(deployment_id, request, x_api_key=x_api_key)
+    url = str(detail.get("url") or "")
+    return [{"domain": url.replace("https://", ""), "status": "active"}] if url else []
+
+
 @app.get("/apps")
 def list_apps(
     namespace: Optional[str] = Query(default=None),
@@ -655,6 +1350,211 @@ def app_container_logs(
         "tail_lines": tail_lines,
         "logs": _read_pod_log(namespace, pod_name, container_name, tail_lines, previous=previous),
     }
+
+
+def _session_token(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header.split(" ", 1)[1].strip()
+    return request.cookies.get("b3cloud_session", "")
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        "b3cloud_session",
+        token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
+
+
+def _github_request(url: str, payload: Optional[Dict[str, str]] = None, token: str = ""):
+    data = None
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "B3Cloud",
+    }
+    if payload is not None:
+        data = urlencode(payload).encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urlrequest.Request(url, data=data, headers=headers, method="POST" if payload is not None else "GET")
+    try:
+        with urlrequest.urlopen(req, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=exc.code, detail=f"GitHub request failed: {detail}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GitHub request failed: {exc}") from exc
+
+
+def _require_user(request: Request, x_api_key: Optional[str]) -> Dict[str, object]:
+    if x_api_key and svc.api_key and x_api_key == svc.api_key:
+        return {"id": "api-key", "email": "api-key@local", "name": "API Key", "github": {}}
+    user = svc.accounts.user_for_token(_session_token(request))
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user
+
+
+def _deployment_id(namespace: str, app_name: str) -> str:
+    return f"{namespace}:{app_name}"
+
+
+def _parse_deployment_id(deployment_id: str) -> tuple[str, str]:
+    if ":" not in deployment_id:
+        raise HTTPException(status_code=400, detail="deployment_id must be '<namespace>:<app_name>'")
+    namespace, app_name = deployment_id.split(":", 1)
+    if not namespace or not app_name:
+        raise HTTPException(status_code=400, detail="deployment_id must include namespace and app name")
+    return namespace, app_name
+
+
+def _list_deployments(namespace: Optional[str] = None) -> List[Dict[str, object]]:
+    seen: set[tuple[str, str]] = set()
+    deployments: List[Dict[str, object]] = []
+    for job in svc.jobs.list_jobs():
+        job_namespace = str(job.get("namespace") or "")
+        job_app_name = str(job.get("app_name") or "")
+        if not job_namespace or not job_app_name or (namespace and job_namespace != namespace):
+            continue
+        key = (job_namespace, job_app_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            detail = _deployment_detail(job_namespace, job_app_name)
+        except Exception:
+            detail = {
+                "deployment_id": _deployment_id(job_namespace, job_app_name),
+                "namespace": job_namespace,
+                "app_name": job_app_name,
+                "status": "unknown",
+            }
+        detail["last_job"] = job
+        deployments.append(detail)
+
+    kube_deployments = (
+        svc.core.apps.list_namespaced_deployment(namespace).items
+        if namespace
+        else svc.core.apps.list_deployment_for_all_namespaces().items
+    )
+    for dep in kube_deployments:
+        labels = dep.metadata.labels or {}
+        app_name = str(labels.get("b3cloud.io/app") or dep.metadata.name)
+        dep_namespace = str(dep.metadata.namespace)
+        key = (dep_namespace, app_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        deployments.append(_deployment_detail(dep_namespace, app_name))
+
+    deployments.sort(key=lambda item: str((item.get("last_job") or {}).get("updated_at") or item.get("updated_at") or ""), reverse=True)
+    return deployments
+
+
+def _deployment_detail(namespace: str, app_name: str) -> Dict[str, object]:
+    status = app_status(namespace, app_name, x_api_key=svc.api_key)
+    jobs = [
+        job
+        for job in svc.jobs.list_jobs()
+        if str(job.get("namespace") or "") == namespace and str(job.get("app_name") or "") == app_name
+    ]
+    latest_job = jobs[0] if jobs else None
+    url = ""
+    github_url = ""
+    git_revision = ""
+    components: List[Dict[str, object]] = []
+    if latest_job:
+        url = f"https://{latest_job.get('domain')}" if latest_job.get("domain") else ""
+        github_url = str(latest_job.get("github_url") or "")
+        git_revision = str(latest_job.get("git_revision") or "")
+        components = _deployment_components(namespace, app_name, latest_job)
+    else:
+        components = _deployment_components(namespace, app_name)
+    status.update(
+        {
+            "deployment_id": _deployment_id(namespace, app_name),
+            "url": url,
+            "github_url": github_url,
+            "git_revision": git_revision,
+            "components": components,
+            "last_job": latest_job,
+            "updated_at": latest_job.get("updated_at") if latest_job else "",
+        }
+    )
+    return status
+
+
+def _deployment_components(
+    namespace: str,
+    app_name: str,
+    job: Optional[Dict[str, object]] = None,
+) -> List[Dict[str, object]]:
+    if job is None:
+        jobs = [
+            item
+            for item in svc.jobs.list_jobs()
+            if str(item.get("namespace") or "") == namespace and str(item.get("app_name") or "") == app_name
+        ]
+        job = jobs[0] if jobs else None
+
+    components = _job_runtime_components(job) if job else [{"app_name": app_name, "component_name": app_name}]
+    out: List[Dict[str, object]] = []
+    for component in components:
+        component_app_name = str(component["app_name"])
+        runtime = _runtime_logs_for_component(
+            namespace,
+            component_app_name,
+            str(component["component_name"]),
+            tail_lines=80,
+        )
+        out.append(
+            {
+                "id": component_app_name,
+                "app_name": component_app_name,
+                "component_name": component["component_name"],
+                "status": runtime.get("status"),
+                "ready_replicas": runtime.get("ready_replicas"),
+                "replicas": runtime.get("replicas"),
+                "error_summary": runtime.get("error_summary"),
+                "deployment_name": runtime.get("deployment_name", ""),
+            }
+        )
+    return out
+
+
+def _delete_application(namespace: str, app_name: str, delete_data: bool = False) -> None:
+    svc.core._cleanup_old_application_deployments(namespace, app_name, active_deployment="")
+    svc.core._delete_service_if_exists(namespace, app_name)
+    svc.core._delete_ingress_if_exists(namespace, app_name)
+    if not delete_data:
+        return
+
+    backing_services: List[ServiceRequirement] = []
+    for job in svc.jobs.list_jobs():
+        if str(job.get("namespace") or "") != namespace or str(job.get("app_name") or "") != app_name:
+            continue
+        for service_type in job.get("provision_services", []) or []:
+            backing_services.append(ServiceRequirement(type=str(service_type), confidence="stored", evidence=[]))
+        for component in job.get("components", []) or []:
+            if not isinstance(component, dict):
+                continue
+            for service_type in component.get("provision_services", []) or []:
+                backing_services.append(ServiceRequirement(type=str(service_type), confidence="stored", evidence=[]))
+    if backing_services:
+        svc.core._cleanup_backing_services(namespace, app_name, backing_services)
+
+
+def _scale_deployment(namespace: str, deployment_name: str, replicas: int) -> None:
+    body = client.V1Scale(
+        spec=client.V1ScaleSpec(replicas=replicas),
+    )
+    svc.core.apps.patch_namespaced_deployment_scale(deployment_name, namespace, body)
 
 
 def _attach_runtime_logs(job: Dict[str, object]) -> None:
