@@ -10,6 +10,7 @@ const deployProgressFill = document.getElementById("deploy-progress-fill");
 const deployTimeline = document.getElementById("deploy-timeline");
 const runtimeLogPanels = document.getElementById("runtime-log-panels");
 let activeJobId = null;
+let activeRuntimePollKey = null;
 let lastJobFingerprint = null;
 let latestAnalysis = null;
 
@@ -113,6 +114,7 @@ async function refreshAll() {
 async function pollJob(jobId) {
   activeJobId = jobId;
   lastJobFingerprint = null;
+  activeRuntimePollKey = null;
   while (activeJobId === jobId) {
     const job = await api(`/deploy-jobs/${encodeURIComponent(jobId)}`);
     statusOutput.textContent = JSON.stringify(job, null, 2);
@@ -135,6 +137,7 @@ async function pollJob(jobId) {
     if (job.status === "succeeded" || job.status === "failed") {
       activeJobId = null;
       lastJobFingerprint = null;
+      continueRuntimePolling(job.runtime_logs || []);
       await refreshApps();
       return job;
     }
@@ -191,6 +194,7 @@ async function deployApp(event) {
   statusOutput.textContent = JSON.stringify(job, null, 2);
   renderDeployProgress(job);
   renderRuntimeLogs(job.runtime_logs || []);
+  continueRuntimePolling(job.runtime_logs || []);
   log("Deploy queued", job);
   await pollJob(job.job_id);
 }
@@ -286,6 +290,63 @@ function renderRuntimeLogs(runtimeLogs) {
       </article>`;
     })
     .join("");
+}
+
+async function continueRuntimePolling(runtimeLogs) {
+  const targets = runtimeLogTargets(runtimeLogs);
+  if (!targets.length) {
+    return;
+  }
+  const pollKey = targets.map((target) => `${target.namespace}/${target.appName}`).join("|");
+  activeRuntimePollKey = pollKey;
+  for (let attempt = 0; attempt < 40 && activeRuntimePollKey === pollKey; attempt += 1) {
+    const refreshed = await Promise.all(
+      targets.map((target) =>
+        api(`/apps/${encodeURIComponent(target.namespace)}/${encodeURIComponent(target.appName)}/runtime-logs`)
+          .catch((error) => ({
+            namespace: target.namespace,
+            app_name: target.appName,
+            component_name: target.componentName,
+            status: "error",
+            ready_replicas: 0,
+            replicas: 0,
+            pods: [],
+            error_summary: String(error),
+          }))
+      )
+    );
+    renderRuntimeLogs(refreshed);
+    if (refreshed.every((component) => ["ready", "failing", "error", "not_deployed"].includes(String(component.status)))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+}
+
+function runtimeLogTargets(runtimeLogs) {
+  if (!Array.isArray(runtimeLogs)) {
+    return [];
+  }
+  const seen = new Set();
+  const targets = [];
+  for (const component of runtimeLogs) {
+    const namespace = String(component.namespace || "");
+    const appName = String(component.app_name || "");
+    if (!namespace || !appName) {
+      continue;
+    }
+    const key = `${namespace}/${appName}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    targets.push({
+      namespace,
+      appName,
+      componentName: String(component.component_name || appName),
+    });
+  }
+  return targets;
 }
 
 function renderPodLogs(pod) {
@@ -491,6 +552,7 @@ async function fetchStatus(event) {
   try {
     const runtime = await api(`/apps/${encodeURIComponent(namespace)}/${encodeURIComponent(appName)}/runtime-logs`);
     renderRuntimeLogs([runtime]);
+    continueRuntimePolling([runtime]);
   } catch (error) {
     renderRuntimeLogs([]);
     log("Runtime logs failed", String(error));
@@ -537,6 +599,7 @@ document.getElementById("deploy-form").addEventListener("submit", async (event) 
     await deployApp(event);
   } catch (error) {
     activeJobId = null;
+    activeRuntimePollKey = null;
     statusOutput.textContent = JSON.stringify({ status: "failed", detail: String(error) }, null, 2);
     renderDeployProgress({ status: "failed", error: String(error), logs: [String(error)] });
     log("Deploy failed", String(error));

@@ -629,6 +629,29 @@ def app_runtime_logs(
     return _runtime_logs_for_component(namespace, app_name, app_name, tail_lines=tail_lines)
 
 
+@app.get("/apps/{namespace}/{app_name}/pods/{pod_name}/containers/{container_name}/logs")
+def app_container_logs(
+    namespace: str,
+    app_name: str,
+    pod_name: str,
+    container_name: str,
+    tail_lines: int = Query(default=200, ge=20, le=1000),
+    previous: bool = Query(default=False),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key)
+    _ensure_pod_belongs_to_app(namespace, app_name, pod_name)
+    return {
+        "namespace": namespace,
+        "app_name": app_name,
+        "pod_name": pod_name,
+        "container_name": container_name,
+        "previous": previous,
+        "tail_lines": tail_lines,
+        "logs": _read_pod_log(namespace, pod_name, container_name, tail_lines, previous=previous),
+    }
+
+
 def _attach_runtime_logs(job: Dict[str, object]) -> None:
     namespace = str(job.get("namespace") or "")
     app_name = str(job.get("app_name") or "")
@@ -779,6 +802,18 @@ def _runtime_logs_for_component(
         payload["status"] = "pending"
         payload["error_summary"] = "No pods exist for this component yet."
     return payload
+
+
+def _ensure_pod_belongs_to_app(namespace: str, app_name: str, pod_name: str) -> None:
+    try:
+        pod = svc.core.core.read_namespaced_pod(pod_name, namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            raise HTTPException(status_code=404, detail=f"Pod not found: {pod_name}") from exc
+        raise
+    labels = pod.metadata.labels or {}
+    if labels.get("app") != app_name:
+        raise HTTPException(status_code=404, detail=f"Pod {pod_name} does not belong to app {app_name}")
 
 
 def _read_pod_log(namespace: str, pod_name: str, container_name: str, tail_lines: int, previous: bool) -> str:
