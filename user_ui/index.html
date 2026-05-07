@@ -90,6 +90,10 @@
               <strong>Internal backing services</strong>
               <p>Detected or selected databases, Redis, and RabbitMQ are created inside the app namespace with generated credentials.</p>
               <p>Generated credentials override any user-provided database/cache/broker env vars. These services use ClusterIP only and are not publicly exposed.</p>
+              <label class="inline-check">
+                <input name="redeploy_services" type="checkbox">
+                Redeploy backing service pods too. Leave unchecked to preserve database/cache/broker state during app redeploys.
+              </label>
               <div id="service-options" class="service-options">
                 <label><input type="checkbox" name="provision_services" value="postgres"> PostgreSQL</label>
                 <label><input type="checkbox" name="provision_services" value="mysql"> MySQL</label>

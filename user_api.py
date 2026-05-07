@@ -39,6 +39,7 @@ class ComponentDeployIn(BaseModel):
     port: int = 8080
     auto_detect_services: bool = True
     provision_services: List[str] = Field(default_factory=list)
+    redeploy_services: bool = False
     env: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -50,6 +51,7 @@ class AppDeployIn(BaseModel):
     node_arch: Optional[str] = None
     auto_detect_services: bool = True
     provision_services: List[str] = Field(default_factory=list)
+    redeploy_services: bool = False
     components: List[ComponentDeployIn] = Field(default_factory=list)
     resources: ResourceLimitsIn = Field(default_factory=ResourceLimitsIn)
 
@@ -159,6 +161,7 @@ class DeployJobStore:
                 "registry_repo": defaults["registry_repo"],
                 "auto_detect_services": payload.auto_detect_services,
                 "provision_services": payload.provision_services,
+                "redeploy_services": payload.redeploy_services,
                 "components": [component.model_dump() for component in payload.components],
                 "logs": ["Job queued."],
                 "result": None,
@@ -360,6 +363,7 @@ def _deploy_component(
         node_arch=payload.node_arch,
         service_requirements=service_requirements,
         public=bool(defaults.get("deploy_public", component.public)),
+        redeploy_backing_services=bool(payload.redeploy_services or component.redeploy_services),
     )
     result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
     result.update(

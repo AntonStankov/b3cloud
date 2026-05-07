@@ -162,6 +162,7 @@ async function deployApp(event) {
     node_arch: form.get("node_arch") || null,
     auto_detect_services: form.get("auto_detect_services") === "on",
     provision_services: provisionServices,
+    redeploy_services: form.get("redeploy_services") === "on",
     components: selectedComponents,
     env: envRaw ? JSON.parse(envRaw) : {},
     resources: {

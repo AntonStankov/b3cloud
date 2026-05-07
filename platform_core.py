@@ -85,6 +85,7 @@ class DeploymentRequest:
     node_arch: Optional[str] = None  # "amd64" (CPX) or "arm64" (CAX)
     service_requirements: Optional[list[ServiceRequirement]] = None
     public: bool = True
+    redeploy_backing_services: bool = False
 
 
 @dataclass
@@ -178,7 +179,12 @@ class PlatformCore:
                 "Provisioning internal backing services: "
                 + ", ".join(sorted({svc.type for svc in backing_services})),
             )
-            generated_env = self._provision_backing_services(req.namespace, req.app_name, backing_services)
+            generated_env = self._provision_backing_services(
+                req.namespace,
+                req.app_name,
+                backing_services,
+                redeploy_backing_services=req.redeploy_backing_services,
+            )
 
         image_fingerprint = json.dumps(
             {
@@ -196,6 +202,8 @@ class PlatformCore:
         self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
         ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
+        if self._delete_application_resources(req.namespace, req.app_name, status_callback=status_callback):
+            self._emit_status(status_callback, f"Removed previous application workload for {req.app_name}.")
         self._emit_status(status_callback, f"Applying Kubernetes Deployment/Service/Ingress for '{req.app_name}'.")
         self._create_or_update_deployment(req, ready_image, generated_env)
         self._create_or_update_service(req.namespace, req.app_name, req.port)
@@ -566,6 +574,7 @@ class PlatformCore:
         namespace: str,
         app_name: str,
         requirements: list[ServiceRequirement],
+        redeploy_backing_services: bool = False,
     ) -> Dict[str, client.V1EnvVar]:
         env: Dict[str, client.V1EnvVar] = {}
         service_types = sorted({req.type for req in requirements})
@@ -573,18 +582,24 @@ class PlatformCore:
         include_database_url = len(database_types) == 1
         for service_type in service_types:
             if service_type == "postgres":
-                env.update(self._ensure_postgres(namespace, app_name, include_database_url))
+                env.update(self._ensure_postgres(namespace, app_name, include_database_url, redeploy_backing_services))
             elif service_type == "mysql":
-                env.update(self._ensure_mysql(namespace, app_name, include_database_url))
+                env.update(self._ensure_mysql(namespace, app_name, include_database_url, redeploy_backing_services))
             elif service_type == "mongodb":
-                env.update(self._ensure_mongodb(namespace, app_name, include_database_url))
+                env.update(self._ensure_mongodb(namespace, app_name, include_database_url, redeploy_backing_services))
             elif service_type == "redis":
-                env.update(self._ensure_redis(namespace, app_name))
+                env.update(self._ensure_redis(namespace, app_name, redeploy_backing_services))
             elif service_type == "rabbitmq":
-                env.update(self._ensure_rabbitmq(namespace, app_name))
+                env.update(self._ensure_rabbitmq(namespace, app_name, redeploy_backing_services))
         return env
 
-    def _ensure_postgres(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+    def _ensure_postgres(
+        self,
+        namespace: str,
+        app_name: str,
+        include_database_url: bool,
+        redeploy_backing_services: bool = False,
+    ) -> Dict[str, client.V1EnvVar]:
         name = f"{app_name}-postgres"
         secret_name = f"{name}-credentials"
         user = "app"
@@ -608,7 +623,7 @@ class PlatformCore:
                 limits={"cpu": "1", "memory": "1Gi"},
             ),
         )
-        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi", redeploy_backing_services)
         self._ensure_connection_secret(
             namespace,
             secret_name,
@@ -642,7 +657,13 @@ class PlatformCore:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
         return env
 
-    def _ensure_mysql(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+    def _ensure_mysql(
+        self,
+        namespace: str,
+        app_name: str,
+        include_database_url: bool,
+        redeploy_backing_services: bool = False,
+    ) -> Dict[str, client.V1EnvVar]:
         name = f"{app_name}-mysql"
         secret_name = f"{name}-credentials"
         user = "app"
@@ -667,7 +688,7 @@ class PlatformCore:
                 limits={"cpu": "1", "memory": "1Gi"},
             ),
         )
-        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi", redeploy_backing_services)
         self._ensure_connection_secret(
             namespace,
             secret_name,
@@ -701,7 +722,13 @@ class PlatformCore:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
         return env
 
-    def _ensure_mongodb(self, namespace: str, app_name: str, include_database_url: bool) -> Dict[str, client.V1EnvVar]:
+    def _ensure_mongodb(
+        self,
+        namespace: str,
+        app_name: str,
+        include_database_url: bool,
+        redeploy_backing_services: bool = False,
+    ) -> Dict[str, client.V1EnvVar]:
         name = f"{app_name}-mongodb"
         secret_name = f"{name}-credentials"
         user = "app"
@@ -725,7 +752,7 @@ class PlatformCore:
                 limits={"cpu": "1", "memory": "1Gi"},
             ),
         )
-        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi")
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "5Gi", redeploy_backing_services)
         self._ensure_connection_secret(
             namespace,
             secret_name,
@@ -767,7 +794,12 @@ class PlatformCore:
             env["DATABASE_URL"] = self._secret_env("DATABASE_URL", secret_name, "DATABASE_URL")
         return env
 
-    def _ensure_redis(self, namespace: str, app_name: str) -> Dict[str, client.V1EnvVar]:
+    def _ensure_redis(
+        self,
+        namespace: str,
+        app_name: str,
+        redeploy_backing_services: bool = False,
+    ) -> Dict[str, client.V1EnvVar]:
         name = f"{app_name}-redis"
         secret_name = f"{name}-credentials"
         secret = self._ensure_generated_secret(namespace, secret_name, {"password": None})
@@ -786,14 +818,19 @@ class PlatformCore:
                 limits={"cpu": "500m", "memory": "512Mi"},
             ),
         )
-        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "2Gi")
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "2Gi", redeploy_backing_services)
         self._ensure_connection_secret(namespace, secret_name, {"REDIS_URL": url, "REDIS_HOST": host})
         return {
             "REDIS_URL": self._secret_env("REDIS_URL", secret_name, "REDIS_URL"),
             "REDIS_HOST": self._secret_env("REDIS_HOST", secret_name, "REDIS_HOST"),
         }
 
-    def _ensure_rabbitmq(self, namespace: str, app_name: str) -> Dict[str, client.V1EnvVar]:
+    def _ensure_rabbitmq(
+        self,
+        namespace: str,
+        app_name: str,
+        redeploy_backing_services: bool = False,
+    ) -> Dict[str, client.V1EnvVar]:
         name = f"{app_name}-rabbitmq"
         secret_name = f"{name}-credentials"
         user = "app"
@@ -815,7 +852,7 @@ class PlatformCore:
                 limits={"cpu": "1", "memory": "1Gi"},
             ),
         )
-        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "3Gi")
+        self._upsert_stateful_set(namespace, name, {"app": name}, container, "data", "3Gi", redeploy_backing_services)
         self._ensure_connection_secret(namespace, secret_name, {"RABBITMQ_URL": url, "AMQP_URL": url, "RABBITMQ_HOST": host})
         return {
             "RABBITMQ_URL": self._secret_env("RABBITMQ_URL", secret_name, "RABBITMQ_URL"),
@@ -906,6 +943,7 @@ class PlatformCore:
         container: client.V1Container,
         volume_name: str,
         storage_size: str,
+        patch_existing: bool = False,
     ) -> None:
         body = client.V1StatefulSet(
             metadata=client.V1ObjectMeta(name=name, namespace=namespace),
@@ -930,12 +968,59 @@ class PlatformCore:
         )
         try:
             self.apps.read_namespaced_stateful_set(name, namespace)
-            self.apps.patch_namespaced_stateful_set(name, namespace, body)
+            if patch_existing:
+                self.apps.patch_namespaced_stateful_set(name, namespace, body)
         except ApiException as exc:
             if exc.status == 404:
                 self.apps.create_namespaced_stateful_set(namespace, body)
             else:
                 raise
+
+    def _delete_application_resources(
+        self,
+        namespace: str,
+        app_name: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        deleted = False
+        try:
+            self.apps.read_namespaced_deployment(app_name, namespace)
+            self._emit_status(status_callback, f"Existing deployment {app_name} found; replacing application workload.")
+            self.apps.delete_namespaced_deployment(
+                app_name,
+                namespace,
+                propagation_policy="Foreground",
+            )
+            deleted = True
+            self._wait_for_deployment_deleted(namespace, app_name)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        for delete_call in (
+            lambda: self.core.delete_namespaced_service(app_name, namespace),
+            lambda: self.networking.delete_namespaced_ingress(app_name, namespace),
+        ):
+            try:
+                delete_call()
+                deleted = True
+            except ApiException as exc:
+                if exc.status != 404:
+                    raise
+
+        return deleted
+
+    def _wait_for_deployment_deleted(self, namespace: str, app_name: str, timeout_seconds: int = 90) -> None:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                self.apps.read_namespaced_deployment(app_name, namespace)
+            except ApiException as exc:
+                if exc.status == 404:
+                    return
+                raise
+            time.sleep(2)
+        raise TimeoutError(f"Timed out waiting for deployment {namespace}/{app_name} to be deleted")
 
     def _create_or_update_service(self, namespace: str, app_name: str, port: int) -> None:
         body = client.V1Service(
