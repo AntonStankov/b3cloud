@@ -173,43 +173,61 @@ class PlatformCore:
         self._ensure_build_namespace_prereqs(req.namespace)
         backing_services = [svc for svc in (req.service_requirements or []) if svc.provision]
         generated_env: Dict[str, client.V1EnvVar] = {}
-        if backing_services:
-            self._emit_status(
-                status_callback,
-                "Provisioning internal backing services: "
-                + ", ".join(sorted({svc.type for svc in backing_services})),
-            )
-            generated_env = self._provision_backing_services(
-                req.namespace,
-                req.app_name,
-                backing_services,
-                redeploy_backing_services=req.redeploy_backing_services,
-            )
+        existing_app = self._application_workload_exists(req.namespace, req.app_name)
+        release_name: Optional[str] = None
+        try:
+            if backing_services:
+                self._emit_status(
+                    status_callback,
+                    "Provisioning internal backing services: "
+                    + ", ".join(sorted({svc.type for svc in backing_services})),
+                )
+                generated_env = self._provision_backing_services(
+                    req.namespace,
+                    req.app_name,
+                    backing_services,
+                    redeploy_backing_services=req.redeploy_backing_services,
+                )
 
-        image_fingerprint = json.dumps(
-            {
-                "github_url": req.github_url,
-                "git_revision": req.git_revision,
-                "app_path": req.app_path,
-                "env": req.env,
-                "port": req.port,
-                "node_arch": req.node_arch,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(image_fingerprint)}"
-        self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
-        ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
+            image_fingerprint = json.dumps(
+                {
+                    "github_url": req.github_url,
+                    "git_revision": req.git_revision,
+                    "app_path": req.app_path,
+                    "env": req.env,
+                    "port": req.port,
+                    "node_arch": req.node_arch,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(image_fingerprint)}"
+            self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
+            ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
-        release_name = self._release_deployment_name(req.app_name)
-        release_labels = {
-            "b3cloud.io/app": req.app_name,
-            "b3cloud.io/release": release_name,
-        }
-        self._emit_status(status_callback, f"Creating replacement workload {release_name} for '{req.app_name}'.")
-        self._create_or_update_deployment(req, ready_image, generated_env, release_name, release_labels)
-        self._wait_for_deployment_ready(req.namespace, release_name, status_callback=status_callback)
+            release_name = self._release_deployment_name(req.app_name)
+            release_labels = {
+                "b3cloud.io/app": req.app_name,
+                "b3cloud.io/release": release_name,
+            }
+            self._emit_status(status_callback, f"Creating replacement workload {release_name} for '{req.app_name}'.")
+            self._create_or_update_deployment(req, ready_image, generated_env, release_name, release_labels)
+            self._wait_for_deployment_ready(req.namespace, release_name, status_callback=status_callback)
+        except Exception:
+            if release_name:
+                self._delete_deployment_if_exists(req.namespace, release_name)
+            if existing_app:
+                self._emit_status(
+                    status_callback,
+                    f"Replacement for '{req.app_name}' failed before traffic switch; keeping the current running version.",
+                )
+            else:
+                self._emit_status(
+                    status_callback,
+                    f"Initial deployment for '{req.app_name}' failed; removing created application resources.",
+                )
+                self._cleanup_failed_initial_deploy_resources(req, backing_services)
+            raise
 
         self._emit_status(status_callback, f"Switching service for '{req.app_name}' to {release_name}.")
         self._create_or_update_service(req.namespace, req.app_name, req.port, release_labels)
@@ -1033,6 +1051,101 @@ class PlatformCore:
                 continue
             self._emit_status(status_callback, f"Removing old application workload {name}.")
             self.apps.delete_namespaced_deployment(name, namespace, propagation_policy="Background")
+
+    def _application_workload_exists(self, namespace: str, app_name: str) -> bool:
+        try:
+            self.core.read_namespaced_service(app_name, namespace)
+            return True
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        for dep in self.apps.list_namespaced_deployment(namespace).items:
+            labels = dep.metadata.labels or {}
+            if dep.metadata.name == app_name or labels.get("b3cloud.io/app") == app_name:
+                return True
+        return False
+
+    def _cleanup_failed_initial_deploy_resources(
+        self,
+        req: DeploymentRequest,
+        backing_services: list[ServiceRequirement],
+    ) -> None:
+        self._cleanup_old_application_deployments(req.namespace, req.app_name, active_deployment="")
+        self._delete_service_if_exists(req.namespace, req.app_name)
+        self._delete_ingress_if_exists(req.namespace, req.app_name)
+        self._cleanup_backing_services(req.namespace, req.app_name, backing_services)
+
+    def _cleanup_backing_services(
+        self,
+        namespace: str,
+        app_name: str,
+        backing_services: list[ServiceRequirement],
+    ) -> None:
+        for service_type in sorted({svc.type for svc in backing_services}):
+            name = self._backing_service_resource_name(app_name, service_type)
+            if not name:
+                continue
+            self._delete_stateful_set_if_exists(namespace, name)
+            self._delete_service_if_exists(namespace, name)
+            self._delete_secret_if_exists(namespace, f"{name}-credentials")
+            self._delete_pvc_if_exists(namespace, f"data-{name}-0")
+
+    @staticmethod
+    def _backing_service_resource_name(app_name: str, service_type: str) -> Optional[str]:
+        suffixes = {
+            "postgres": "postgres",
+            "mysql": "mysql",
+            "mongodb": "mongodb",
+            "redis": "redis",
+            "rabbitmq": "rabbitmq",
+        }
+        suffix = suffixes.get(service_type)
+        if not suffix:
+            return None
+        return f"{app_name}-{suffix}"
+
+    def _delete_deployment_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.apps.delete_namespaced_deployment(name, namespace, propagation_policy="Background")
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _delete_stateful_set_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.apps.delete_namespaced_stateful_set(name, namespace, propagation_policy="Background")
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _delete_service_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.core.delete_namespaced_service(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _delete_ingress_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.networking.delete_namespaced_ingress(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _delete_secret_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.core.delete_namespaced_secret(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+    def _delete_pvc_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.core.delete_namespaced_persistent_volume_claim(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
 
     def _create_or_update_service(
         self,
