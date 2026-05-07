@@ -202,20 +202,28 @@ class PlatformCore:
         self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
         ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
-        if self._delete_application_resources(req.namespace, req.app_name, status_callback=status_callback):
-            self._emit_status(status_callback, f"Removed previous application workload for {req.app_name}.")
-        self._emit_status(status_callback, f"Applying Kubernetes Deployment/Service/Ingress for '{req.app_name}'.")
-        self._create_or_update_deployment(req, ready_image, generated_env)
-        self._create_or_update_service(req.namespace, req.app_name, req.port)
+        release_name = self._release_deployment_name(req.app_name)
+        release_labels = {
+            "b3cloud.io/app": req.app_name,
+            "b3cloud.io/release": release_name,
+        }
+        self._emit_status(status_callback, f"Creating replacement workload {release_name} for '{req.app_name}'.")
+        self._create_or_update_deployment(req, ready_image, generated_env, release_name, release_labels)
+        self._wait_for_deployment_ready(req.namespace, release_name, status_callback=status_callback)
+
+        self._emit_status(status_callback, f"Switching service for '{req.app_name}' to {release_name}.")
+        self._create_or_update_service(req.namespace, req.app_name, req.port, release_labels)
         if req.public:
             self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
             self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
             self.cloudflare.ensure_dns_and_tunnel_route(self.cloudflare_config, req.target_host)
+        self._cleanup_old_application_deployments(req.namespace, req.app_name, release_name, status_callback=status_callback)
         self._emit_status(status_callback, f"Deployment finished for {req.app_name}.")
 
         return {
             "namespace": req.namespace,
             "app_name": req.app_name,
+            "deployment_name": release_name,
             "image": ready_image,
             "url": f"https://{req.target_host}" if req.public else "",
             "status": "deployed",
@@ -511,8 +519,12 @@ class PlatformCore:
         req: DeploymentRequest,
         image: str,
         generated_env: Optional[Dict[str, client.V1EnvVar]] = None,
+        deployment_name: Optional[str] = None,
+        release_labels: Optional[Dict[str, str]] = None,
     ) -> None:
-        labels = {"app": req.app_name}
+        deployment_name = deployment_name or req.app_name
+        release_labels = release_labels or {"app": req.app_name}
+        labels = {"app": deployment_name, **release_labels}
         env = [client.V1EnvVar(name="PORT", value=str(req.port))]
         reserved_env_names = {"PORT"}.union((generated_env or {}).keys())
         env.extend(client.V1EnvVar(name=k, value=v) for k, v in req.env.items() if k not in reserved_env_names)
@@ -552,17 +564,21 @@ class PlatformCore:
         )
 
         body = client.V1Deployment(
-            metadata=client.V1ObjectMeta(name=req.app_name, namespace=req.namespace),
+            metadata=client.V1ObjectMeta(
+                name=deployment_name,
+                namespace=req.namespace,
+                labels={"b3cloud.io/app": req.app_name, **release_labels},
+            ),
             spec=client.V1DeploymentSpec(
                 replicas=1,
-                selector=client.V1LabelSelector(match_labels=labels),
+                selector=client.V1LabelSelector(match_labels=release_labels),
                 template=template,
             ),
         )
 
         try:
-            self.apps.read_namespaced_deployment(req.app_name, req.namespace)
-            self.apps.patch_namespaced_deployment(req.app_name, req.namespace, body)
+            self.apps.read_namespaced_deployment(deployment_name, req.namespace)
+            self.apps.patch_namespaced_deployment(deployment_name, req.namespace, body)
         except ApiException as exc:
             if exc.status == 404:
                 self.apps.create_namespaced_deployment(req.namespace, body)
@@ -976,57 +992,59 @@ class PlatformCore:
             else:
                 raise
 
-    def _delete_application_resources(
+    def _wait_for_deployment_ready(
+        self,
+        namespace: str,
+        deployment_name: str,
+        timeout_seconds: int = 180,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            dep = self.apps.read_namespaced_deployment(deployment_name, namespace)
+            desired = dep.spec.replicas or 0
+            ready = dep.status.ready_replicas or 0
+            available = dep.status.available_replicas or 0
+            if desired > 0 and ready >= desired and available >= desired:
+                self._emit_status(status_callback, f"Replacement workload {deployment_name} is ready.")
+                return
+            time.sleep(3)
+        raise TimeoutError(f"Timed out waiting for deployment {namespace}/{deployment_name} to become ready")
+
+    def _release_deployment_name(self, app_name: str) -> str:
+        suffix = self._short_hash(f"{app_name}:{time.time_ns()}")
+        max_prefix = 63 - len(suffix) - 1
+        return sanitize_name(f"{app_name[:max_prefix]}-{suffix}")
+
+    def _cleanup_old_application_deployments(
         self,
         namespace: str,
         app_name: str,
+        active_deployment: str,
         status_callback: Optional[Callable[[str], None]] = None,
-    ) -> bool:
-        deleted = False
-        try:
-            self.apps.read_namespaced_deployment(app_name, namespace)
-            self._emit_status(status_callback, f"Existing deployment {app_name} found; replacing application workload.")
-            self.apps.delete_namespaced_deployment(
-                app_name,
-                namespace,
-                propagation_policy="Foreground",
-            )
-            deleted = True
-            self._wait_for_deployment_deleted(namespace, app_name)
-        except ApiException as exc:
-            if exc.status != 404:
-                raise
+    ) -> None:
+        deployments = self.apps.list_namespaced_deployment(namespace).items
+        for dep in deployments:
+            name = dep.metadata.name
+            labels = dep.metadata.labels or {}
+            legacy_name_match = name == app_name
+            managed_label_match = labels.get("b3cloud.io/app") == app_name
+            if name == active_deployment or not (legacy_name_match or managed_label_match):
+                continue
+            self._emit_status(status_callback, f"Removing old application workload {name}.")
+            self.apps.delete_namespaced_deployment(name, namespace, propagation_policy="Background")
 
-        for delete_call in (
-            lambda: self.core.delete_namespaced_service(app_name, namespace),
-            lambda: self.networking.delete_namespaced_ingress(app_name, namespace),
-        ):
-            try:
-                delete_call()
-                deleted = True
-            except ApiException as exc:
-                if exc.status != 404:
-                    raise
-
-        return deleted
-
-    def _wait_for_deployment_deleted(self, namespace: str, app_name: str, timeout_seconds: int = 90) -> None:
-        deadline = time.time() + timeout_seconds
-        while time.time() < deadline:
-            try:
-                self.apps.read_namespaced_deployment(app_name, namespace)
-            except ApiException as exc:
-                if exc.status == 404:
-                    return
-                raise
-            time.sleep(2)
-        raise TimeoutError(f"Timed out waiting for deployment {namespace}/{app_name} to be deleted")
-
-    def _create_or_update_service(self, namespace: str, app_name: str, port: int) -> None:
+    def _create_or_update_service(
+        self,
+        namespace: str,
+        app_name: str,
+        port: int,
+        selector: Optional[Dict[str, str]] = None,
+    ) -> None:
         body = client.V1Service(
             metadata=client.V1ObjectMeta(name=app_name, namespace=namespace),
             spec=client.V1ServiceSpec(
-                selector={"app": app_name},
+                selector=selector or {"app": app_name},
                 ports=[client.V1ServicePort(port=80, target_port=port)],
                 type="ClusterIP",
             ),

@@ -601,7 +601,7 @@ def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None))
 def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, str]:
     svc.auth(x_api_key)
     try:
-        dep = svc.core.apps.read_namespaced_deployment(app_name, namespace)
+        dep = _active_app_deployment(namespace, app_name)
     except ApiException as exc:
         if exc.status == 404:
             return {
@@ -615,6 +615,7 @@ def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(
     return {
         "namespace": namespace,
         "app_name": app_name,
+        "deployment_name": dep.metadata.name,
         "status": "deployed",
         "replicas": str(dep.spec.replicas or 0),
         "ready_replicas": str(dep.status.ready_replicas or 0),
@@ -745,9 +746,10 @@ def _runtime_logs_for_component(
     }
 
     try:
-        dep = svc.core.apps.read_namespaced_deployment(app_name, namespace)
+        dep = _active_app_deployment(namespace, app_name)
         payload["replicas"] = dep.spec.replicas or 0
         payload["ready_replicas"] = dep.status.ready_replicas or 0
+        payload["deployment_name"] = dep.metadata.name
         payload["status"] = "ready" if (dep.status.ready_replicas or 0) >= (dep.spec.replicas or 0) else "not_ready"
     except ApiException as exc:
         if exc.status == 404:
@@ -759,7 +761,10 @@ def _runtime_logs_for_component(
         return payload
 
     try:
-        pods = svc.core.core.list_namespaced_pod(namespace, label_selector=f"app={app_name}").items
+        pods = svc.core.core.list_namespaced_pod(
+            namespace,
+            label_selector=_active_pod_label_selector(namespace, app_name),
+        ).items
     except ApiException as exc:
         payload["status"] = "error"
         payload["error_summary"] = f"Kubernetes pod lookup failed: {exc}"
@@ -808,6 +813,49 @@ def _runtime_logs_for_component(
     return payload
 
 
+def _active_app_deployment(namespace: str, app_name: str):
+    selector = _active_service_selector(namespace, app_name)
+    deployments = _matching_app_deployments(namespace, app_name)
+    if selector:
+        for dep in deployments:
+            template_labels = dep.spec.template.metadata.labels or {}
+            if all(template_labels.get(key) == value for key, value in selector.items()):
+                return dep
+    if deployments:
+        deployments.sort(
+            key=lambda dep: dep.metadata.creation_timestamp.isoformat() if dep.metadata.creation_timestamp else "",
+            reverse=True,
+        )
+        return deployments[0]
+    raise ApiException(status=404, reason=f"Deployment not found for app {app_name}")
+
+
+def _matching_app_deployments(namespace: str, app_name: str):
+    deployments = svc.core.apps.list_namespaced_deployment(namespace).items
+    return [
+        dep
+        for dep in deployments
+        if dep.metadata.name == app_name or (dep.metadata.labels or {}).get("b3cloud.io/app") == app_name
+    ]
+
+
+def _active_pod_label_selector(namespace: str, app_name: str) -> str:
+    selector = _active_service_selector(namespace, app_name)
+    if selector:
+        return ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
+    return f"app={app_name}"
+
+
+def _active_service_selector(namespace: str, app_name: str) -> Dict[str, str]:
+    try:
+        service = svc.core.core.read_namespaced_service(app_name, namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return {}
+        raise
+    return dict(service.spec.selector or {})
+
+
 def _ensure_pod_belongs_to_app(namespace: str, app_name: str, pod_name: str) -> None:
     try:
         pod = svc.core.core.read_namespaced_pod(pod_name, namespace)
@@ -816,7 +864,7 @@ def _ensure_pod_belongs_to_app(namespace: str, app_name: str, pod_name: str) -> 
             raise HTTPException(status_code=404, detail=f"Pod not found: {pod_name}") from exc
         raise
     labels = pod.metadata.labels or {}
-    if labels.get("app") != app_name:
+    if labels.get("app") != app_name and labels.get("b3cloud.io/app") != app_name:
         raise HTTPException(status_code=404, detail=f"Pod {pod_name} does not belong to app {app_name}")
 
 
