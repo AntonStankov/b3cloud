@@ -28,7 +28,7 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 
-from platform_core import DeploymentRequest, PlatformCore, ResourceLimits, ServiceRequirement, sanitize_name
+from platform_core import AutoscalingConfig, DeploymentRequest, PlatformCore, ResourceLimits, ServiceRequirement, sanitize_name
 
 
 class ResourceLimitsIn(BaseModel):
@@ -36,6 +36,14 @@ class ResourceLimitsIn(BaseModel):
     cpu_limit: str = "500m"
     memory_request: str = "128Mi"
     memory_limit: str = "512Mi"
+
+
+class AutoscalingIn(BaseModel):
+    enabled: bool = True
+    min_replicas: int = Field(default=1, ge=1, le=100)
+    max_replicas: int = Field(default=5, ge=1, le=100)
+    target_cpu_utilization: int = Field(default=80, ge=1, le=100)
+    target_memory_utilization: int = Field(default=80, ge=1, le=100)
 
 
 class ComponentDeployIn(BaseModel):
@@ -47,6 +55,7 @@ class ComponentDeployIn(BaseModel):
     auto_detect_services: bool = True
     provision_services: List[str] = Field(default_factory=list)
     redeploy_services: bool = False
+    autoscaling: Optional[AutoscalingIn] = None
     env: Dict[str, str] = Field(default_factory=dict)
 
 
@@ -61,6 +70,7 @@ class AppDeployIn(BaseModel):
     redeploy_services: bool = False
     components: List[ComponentDeployIn] = Field(default_factory=list)
     resources: ResourceLimitsIn = Field(default_factory=ResourceLimitsIn)
+    autoscaling: AutoscalingIn = Field(default_factory=AutoscalingIn)
 
 
 class RepoAnalyzeIn(BaseModel):
@@ -202,6 +212,7 @@ class DeployJobStore:
                 "auto_detect_services": payload.auto_detect_services,
                 "provision_services": payload.provision_services,
                 "redeploy_services": payload.redeploy_services,
+                "autoscaling": payload.autoscaling.model_dump(),
                 "components": [component.model_dump() for component in payload.components],
                 "logs": ["Job queued."],
                 "result": None,
@@ -587,6 +598,7 @@ def _deploy_component(
         service_requirements=service_requirements,
         public=bool(defaults.get("deploy_public", component.public)),
         redeploy_backing_services=bool(payload.redeploy_services or component.redeploy_services),
+        autoscaling=_autoscaling_config(component.autoscaling or payload.autoscaling),
     )
     result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
     result.update(
@@ -603,6 +615,35 @@ def _deploy_component(
         }
     )
     return result
+
+
+def _autoscaling_config(payload: AutoscalingIn) -> AutoscalingConfig:
+    return AutoscalingConfig(
+        enabled=payload.enabled,
+        min_replicas=payload.min_replicas,
+        max_replicas=payload.max_replicas,
+        target_cpu_utilization=payload.target_cpu_utilization,
+        target_memory_utilization=payload.target_memory_utilization,
+    )
+
+
+def _latest_autoscaling_config(namespace: str, app_name: str) -> AutoscalingConfig:
+    for job in svc.jobs.list_jobs():
+        if str(job.get("namespace") or "") != namespace or str(job.get("app_name") or "") != app_name:
+            continue
+        payload = job.get("autoscaling")
+        if isinstance(payload, dict):
+            try:
+                return AutoscalingConfig(
+                    enabled=bool(payload.get("enabled", True)),
+                    min_replicas=int(payload.get("min_replicas", 1)),
+                    max_replicas=int(payload.get("max_replicas", 5)),
+                    target_cpu_utilization=int(payload.get("target_cpu_utilization", 80)),
+                    target_memory_utilization=int(payload.get("target_memory_utilization", 80)),
+                )
+            except (TypeError, ValueError):
+                return AutoscalingConfig()
+    return AutoscalingConfig()
 
 
 def _component_communication_env(
@@ -1006,6 +1047,7 @@ def v1_stop_deployment(
     _require_user(request, x_api_key)
     namespace, app_name = _parse_deployment_id(deployment_id)
     deployment_name = _active_app_deployment(namespace, app_name).metadata.name
+    svc.core._delete_hpa_if_exists(namespace, app_name)
     _scale_deployment(namespace, deployment_name, 0)
     return {"deployment_id": deployment_id, "status": "stopped"}
 
@@ -1020,6 +1062,9 @@ def v1_start_deployment(
     namespace, app_name = _parse_deployment_id(deployment_id)
     deployment_name = _active_app_deployment(namespace, app_name).metadata.name
     _scale_deployment(namespace, deployment_name, 1)
+    autoscaling = _latest_autoscaling_config(namespace, app_name)
+    if autoscaling.enabled:
+        svc.core._create_or_update_hpa(namespace, app_name, deployment_name, autoscaling)
     return {"deployment_id": deployment_id, "status": "started"}
 
 
@@ -1293,7 +1338,7 @@ def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None))
 
 
 @app.get("/apps/{namespace}/{app_name}")
-def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, str]:
+def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
     svc.auth(x_api_key)
     try:
         dep = _active_app_deployment(namespace, app_name)
@@ -1315,6 +1360,7 @@ def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(
         "replicas": str(dep.spec.replicas or 0),
         "ready_replicas": str(dep.status.ready_replicas or 0),
         "image": image,
+        "autoscaling": _hpa_status(namespace, app_name),
     }
 
 
@@ -1530,6 +1576,7 @@ def _deployment_components(
 
 def _delete_application(namespace: str, app_name: str, delete_data: bool = False) -> None:
     svc.core._cleanup_old_application_deployments(namespace, app_name, active_deployment="")
+    svc.core._delete_hpa_if_exists(namespace, app_name)
     svc.core._delete_service_if_exists(namespace, app_name)
     svc.core._delete_ingress_if_exists(namespace, app_name)
     if not delete_data:
@@ -1754,6 +1801,23 @@ def _active_service_selector(namespace: str, app_name: str) -> Dict[str, str]:
             return {}
         raise
     return dict(service.spec.selector or {})
+
+
+def _hpa_status(namespace: str, app_name: str) -> Dict[str, object]:
+    try:
+        hpa = svc.core.autoscaling.read_namespaced_horizontal_pod_autoscaler(app_name, namespace)
+    except ApiException as exc:
+        if exc.status == 404:
+            return {"enabled": False}
+        return {"enabled": False, "error": str(exc)}
+    return {
+        "enabled": True,
+        "min_replicas": hpa.spec.min_replicas,
+        "max_replicas": hpa.spec.max_replicas,
+        "current_replicas": hpa.status.current_replicas,
+        "desired_replicas": hpa.status.desired_replicas,
+        "current_metrics": [metric.to_dict() for metric in (hpa.status.current_metrics or [])],
+    }
 
 
 def _ensure_pod_belongs_to_app(namespace: str, app_name: str, pod_name: str) -> None:

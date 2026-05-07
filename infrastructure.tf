@@ -579,12 +579,16 @@ resource "helm_release" "cluster_autoscaler" {
       }
     ]
     extraArgs = {
-      "balance-similar-node-groups"   = true
-      "enforce-node-group-min-size"   = true
-      "expander"                      = "least-waste"
-      "skip-nodes-with-local-storage" = false
-      "skip-nodes-with-system-pods"   = false
-      "max-node-provision-time"       = "15m"
+      "balance-similar-node-groups"      = true
+      "enforce-node-group-min-size"      = true
+      "expander"                         = "least-waste"
+      "skip-nodes-with-local-storage"    = false
+      "skip-nodes-with-system-pods"      = false
+      "max-node-provision-time"          = "15m"
+      "scale-down-enabled"               = true
+      "scale-down-delay-after-add"       = "10m"
+      "scale-down-unneeded-time"         = "10m"
+      "scale-down-utilization-threshold" = "0.5"
     }
     rbac = {
       create = true

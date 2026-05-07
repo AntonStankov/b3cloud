@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 
-from platform_core import DeploymentRequest, PlatformCore, ResourceLimits, sanitize_name
+from platform_core import AutoscalingConfig, DeploymentRequest, PlatformCore, ResourceLimits, sanitize_name
 
 
 class ResourceLimitsIn(BaseModel):
@@ -32,6 +32,14 @@ class ResourceLimitsIn(BaseModel):
     cpu_limit: str = "500m"
     memory_request: str = "128Mi"
     memory_limit: str = "512Mi"
+
+
+class AutoscalingIn(BaseModel):
+    enabled: bool = True
+    min_replicas: int = Field(default=1, ge=1, le=100)
+    max_replicas: int = Field(default=5, ge=1, le=100)
+    target_cpu_utilization: int = Field(default=80, ge=1, le=100)
+    target_memory_utilization: int = Field(default=80, ge=1, le=100)
 
 
 class DeploymentCreateIn(BaseModel):
@@ -45,6 +53,7 @@ class DeploymentCreateIn(BaseModel):
     git_revision: str = "main"
     port: int = 8080
     node_arch: Optional[str] = None
+    autoscaling: AutoscalingIn = Field(default_factory=AutoscalingIn)
 
 
 class ScaleIn(BaseModel):
@@ -232,6 +241,13 @@ def create_deployment(payload: DeploymentCreateIn, _: None = Depends(require_adm
         git_revision=payload.git_revision,
         port=payload.port,
         node_arch=payload.node_arch,
+        autoscaling=AutoscalingConfig(
+            enabled=payload.autoscaling.enabled,
+            min_replicas=payload.autoscaling.min_replicas,
+            max_replicas=payload.autoscaling.max_replicas,
+            target_cpu_utilization=payload.autoscaling.target_cpu_utilization,
+            target_memory_utilization=payload.autoscaling.target_memory_utilization,
+        ),
     )
     try:
         return core.new_deployment(req)

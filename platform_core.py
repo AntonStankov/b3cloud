@@ -39,6 +39,15 @@ class ResourceLimits:
 
 
 @dataclass
+class AutoscalingConfig:
+    enabled: bool = True
+    min_replicas: int = 1
+    max_replicas: int = 5
+    target_cpu_utilization: int = 80
+    target_memory_utilization: int = 80
+
+
+@dataclass
 class ServiceRequirement:
     type: str
     confidence: str
@@ -86,6 +95,7 @@ class DeploymentRequest:
     service_requirements: Optional[list[ServiceRequirement]] = None
     public: bool = True
     redeploy_backing_services: bool = False
+    autoscaling: Optional[AutoscalingConfig] = None
 
 
 @dataclass
@@ -156,6 +166,7 @@ class PlatformCore:
 
         self.core = client.CoreV1Api()
         self.apps = client.AppsV1Api()
+        self.autoscaling = client.AutoscalingV2Api()
         self.custom = client.CustomObjectsApi()
         self.networking = client.NetworkingV1Api()
         self.cloudflare = CloudflareAutomation()
@@ -167,6 +178,7 @@ class PlatformCore:
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, str]:
         self._validate_deployment_request(req)
+        autoscaling = req.autoscaling or AutoscalingConfig()
         self._emit_status(status_callback, f"Preparing namespace '{req.namespace}'.")
         self._ensure_namespace(req.namespace)
         self._apply_namespace_guardrails(req.namespace)
@@ -231,6 +243,8 @@ class PlatformCore:
 
         self._emit_status(status_callback, f"Switching service for '{req.app_name}' to {release_name}.")
         self._create_or_update_service(req.namespace, req.app_name, req.port, release_labels)
+        if autoscaling.enabled:
+            self._create_or_update_hpa(req.namespace, req.app_name, release_name, autoscaling)
         if req.public:
             self._create_or_update_ingress(req.namespace, req.app_name, req.target_host, req.port)
             self._emit_status(status_callback, f"Ensuring Cloudflare route for {req.target_host}.")
@@ -285,6 +299,9 @@ class PlatformCore:
         # Basic FQDN check; platform API should do stricter tenant-domain validation.
         if "." not in req.target_host or req.target_host.startswith(".") or req.target_host.endswith("."):
             raise ValueError(f"target_host must be a valid FQDN, got: {req.target_host}")
+        autoscaling = req.autoscaling or AutoscalingConfig()
+        if autoscaling.max_replicas < autoscaling.min_replicas:
+            raise ValueError("autoscaling.max_replicas must be greater than or equal to autoscaling.min_replicas")
 
     @staticmethod
     def _load_cloudflare_config_from_env() -> CloudflareConfig:
@@ -1072,6 +1089,7 @@ class PlatformCore:
         backing_services: list[ServiceRequirement],
     ) -> None:
         self._cleanup_old_application_deployments(req.namespace, req.app_name, active_deployment="")
+        self._delete_hpa_if_exists(req.namespace, req.app_name)
         self._delete_service_if_exists(req.namespace, req.app_name)
         self._delete_ingress_if_exists(req.namespace, req.app_name)
         self._cleanup_backing_services(req.namespace, req.app_name, backing_services)
@@ -1170,6 +1188,88 @@ class PlatformCore:
             if exc.status == 404:
                 self.core.create_namespaced_service(namespace, body)
             else:
+                raise
+
+    def _create_or_update_hpa(
+        self,
+        namespace: str,
+        app_name: str,
+        deployment_name: str,
+        autoscaling: AutoscalingConfig,
+    ) -> None:
+        min_replicas = max(1, autoscaling.min_replicas)
+        max_replicas = max(min_replicas, autoscaling.max_replicas)
+        metrics = [
+            client.V2MetricSpec(
+                type="Resource",
+                resource=client.V2ResourceMetricSource(
+                    name="cpu",
+                    target=client.V2MetricTarget(
+                        type="Utilization",
+                        average_utilization=autoscaling.target_cpu_utilization,
+                    ),
+                ),
+            ),
+            client.V2MetricSpec(
+                type="Resource",
+                resource=client.V2ResourceMetricSource(
+                    name="memory",
+                    target=client.V2MetricTarget(
+                        type="Utilization",
+                        average_utilization=autoscaling.target_memory_utilization,
+                    ),
+                ),
+            ),
+        ]
+        body = client.V2HorizontalPodAutoscaler(
+            metadata=client.V1ObjectMeta(
+                name=app_name,
+                namespace=namespace,
+                labels={"b3cloud.io/app": app_name},
+            ),
+            spec=client.V2HorizontalPodAutoscalerSpec(
+                scale_target_ref=client.V2CrossVersionObjectReference(
+                    api_version="apps/v1",
+                    kind="Deployment",
+                    name=deployment_name,
+                ),
+                min_replicas=min_replicas,
+                max_replicas=max_replicas,
+                metrics=metrics,
+                behavior=client.V2HorizontalPodAutoscalerBehavior(
+                    scale_up=client.V2HPAScalingRules(
+                        stabilization_window_seconds=60,
+                        policies=[
+                            client.V2HPAScalingPolicy(type="Percent", value=100, period_seconds=60),
+                            client.V2HPAScalingPolicy(type="Pods", value=4, period_seconds=60),
+                        ],
+                        select_policy="Max",
+                    ),
+                    scale_down=client.V2HPAScalingRules(
+                        stabilization_window_seconds=300,
+                        policies=[
+                            client.V2HPAScalingPolicy(type="Percent", value=50, period_seconds=60),
+                            client.V2HPAScalingPolicy(type="Pods", value=2, period_seconds=60),
+                        ],
+                        select_policy="Min",
+                    ),
+                ),
+            ),
+        )
+        try:
+            self.autoscaling.read_namespaced_horizontal_pod_autoscaler(app_name, namespace)
+            self.autoscaling.patch_namespaced_horizontal_pod_autoscaler(app_name, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.autoscaling.create_namespaced_horizontal_pod_autoscaler(namespace, body)
+            else:
+                raise
+
+    def _delete_hpa_if_exists(self, namespace: str, name: str) -> None:
+        try:
+            self.autoscaling.delete_namespaced_horizontal_pod_autoscaler(name, namespace)
+        except ApiException as exc:
+            if exc.status != 404:
                 raise
 
     def _create_or_update_ingress(self, namespace: str, app_name: str, host: str, service_port: int) -> None:
