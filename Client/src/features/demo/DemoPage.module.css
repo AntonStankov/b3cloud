@@ -1,0 +1,87 @@
+.page {
+  width: min(960px, calc(100% - 40px));
+  margin: 0 auto;
+  padding-bottom: 70px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 22px 0;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+}
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+}
+
+.main {
+  text-align: center;
+  padding-top: 40px;
+}
+.title {
+  font-size: clamp(2rem, 5vw, 3rem);
+  margin: 14px 0;
+}
+.subtitle {
+  color: var(--muted);
+  max-width: 560px;
+  margin: 0 auto;
+  font-size: 1.05rem;
+}
+
+.steps {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
+  margin-top: 42px;
+  text-align: left;
+}
+.step {
+  padding: 22px;
+}
+.step h3 {
+  margin: 12px 0 6px;
+  font-size: 1.02rem;
+}
+.stepIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.placeholder {
+  margin-top: 36px;
+  padding: 44px;
+  border-radius: var(--radius);
+  border: 1px dashed var(--line-strong);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--accent-strong);
+}
+
+@media (max-width: 720px) {
+  .steps {
+    grid-template-columns: 1fr;
+  }
+}
