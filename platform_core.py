@@ -2114,30 +2114,76 @@ class PlatformCore:
 
     @staticmethod
     def _infer_build_env(app_dir: Path) -> Dict[str, str]:
+        env: Dict[str, str] = {}
         package_json = app_dir / "package.json"
-        if not package_json.exists():
-            return {}
+        if package_json.exists():
+            try:
+                package_data = json.loads(package_json.read_text())
+            except (OSError, json.JSONDecodeError):
+                package_data = {}
 
+            scripts = package_data.get("scripts", {})
+            dependencies = package_data.get("dependencies", {})
+            dev_dependencies = package_data.get("devDependencies", {})
+            has_build = isinstance(scripts.get("build"), str) and scripts["build"].strip() != ""
+            has_start = isinstance(scripts.get("start"), str) and scripts["start"].strip() != ""
+            combined_dependencies = {**dependencies, **dev_dependencies}
+            is_frontend = any(dep in combined_dependencies for dep in ("vite", "@vitejs/plugin-react", "react", "react-dom"))
+            if has_build and not has_start and is_frontend:
+                env.update(
+                    {
+                        "BP_NODE_RUN_SCRIPTS": "build",
+                        "BP_WEB_SERVER": "nginx",
+                        "BP_WEB_SERVER_ROOT": "dist",
+                        "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
+                    }
+                )
+
+        env.update(PlatformCore._infer_java_build_env(app_dir))
+        return env
+
+    @staticmethod
+    def _infer_java_build_env(app_dir: Path) -> Dict[str, str]:
+        pom_xml = app_dir / "pom.xml"
+        if not pom_xml.exists():
+            return {}
         try:
-            package_data = json.loads(package_json.read_text())
-        except (OSError, json.JSONDecodeError):
+            pom = pom_xml.read_text(errors="ignore")
+        except OSError:
             return {}
 
-        scripts = package_data.get("scripts", {})
-        dependencies = package_data.get("dependencies", {})
-        dev_dependencies = package_data.get("devDependencies", {})
-        has_build = isinstance(scripts.get("build"), str) and scripts["build"].strip() != ""
-        has_start = isinstance(scripts.get("start"), str) and scripts["start"].strip() != ""
-        combined_dependencies = {**dependencies, **dev_dependencies}
-        is_frontend = any(dep in combined_dependencies for dep in ("vite", "@vitejs/plugin-react", "react", "react-dom"))
-        if has_build and not has_start and is_frontend:
-            return {
-                "BP_NODE_RUN_SCRIPTS": "build",
-                "BP_WEB_SERVER": "nginx",
-                "BP_WEB_SERVER_ROOT": "dist",
-                "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
-            }
+        version_patterns = (
+            r"<java\.version>\s*([^<\s]+)\s*</java\.version>",
+            r"<maven\.compiler\.release>\s*([^<\s]+)\s*</maven\.compiler\.release>",
+            r"<maven\.compiler\.target>\s*([^<\s]+)\s*</maven\.compiler\.target>",
+            r"<maven\.compiler\.source>\s*([^<\s]+)\s*</maven\.compiler\.source>",
+        )
+        for pattern in version_patterns:
+            match = re.search(pattern, pom)
+            if not match:
+                continue
+            major = PlatformCore._normalize_java_major(match.group(1))
+            if major:
+                return {"BP_JVM_VERSION": f"{major}.*"}
+
+        # Lombok and older annotation processors often break on the latest JDK with
+        # javac internals errors; Java 17 is the safest default for Spring Boot 3.x.
+        if "org.projectlombok" in pom or "spring-boot" in pom:
+            return {"BP_JVM_VERSION": "17.*"}
         return {}
+
+    @staticmethod
+    def _normalize_java_major(value: str) -> str:
+        cleaned = value.strip().strip("vV")
+        if cleaned.startswith("1."):
+            cleaned = cleaned.split(".", 2)[1]
+        match = re.match(r"(\d+)", cleaned)
+        if not match:
+            return ""
+        major = int(match.group(1))
+        if major < 8 or major > 25:
+            return ""
+        return str(major)
 
     @staticmethod
     def _prepare_static_frontend_build(
