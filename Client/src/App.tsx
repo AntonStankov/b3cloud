@@ -47,7 +47,7 @@ function DeploymentExperience() {
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [githubToken, setGithubToken] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
-  const [revision, setRevision] = useState("main");
+  const [revision, setRevision] = useState("");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -192,7 +192,7 @@ function DeploymentExperience() {
       id: repoUrl,
       fullName: repoUrl.replace(/^https:\/\/github.com\//, ""),
       url: repoUrl,
-      defaultBranch: revision,
+      defaultBranch: revision || "",
       private: false,
       isMonorepo: false,
     };
@@ -210,7 +210,7 @@ function DeploymentExperience() {
       const job = await deploy({
         github_url: repository.url,
         github_token: githubToken || undefined,
-        git_revision: repository.defaultBranch,
+        git_revision: repository.defaultBranch || "",
         port: state.services[0]?.port ?? 8080,
         node_arch: "amd64",
         auto_detect_services: true,
@@ -482,7 +482,7 @@ function SourceView(props: {
       </div>
       <div className="mt-5 grid grid-cols-[minmax(0,1fr)_180px_auto] gap-3 max-md:grid-cols-1">
         <input value={props.repoUrl} onChange={(event) => props.onRepoUrlChange(event.target.value)} placeholder="https://github.com/acme/repo" className="rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-white outline-none" />
-        <input value={props.revision} onChange={(event) => props.onRevisionChange(event.target.value)} placeholder="main" className="rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-white outline-none" />
+        <input value={props.revision} onChange={(event) => props.onRevisionChange(event.target.value)} placeholder="default branch" className="rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-white outline-none" />
         <button type="button" onClick={props.onInspectManual} disabled={!props.repoUrl || props.busy === "inspect"} className="rounded-2xl bg-white px-4 py-3 font-semibold text-[#0B0B0F]">{props.busy === "inspect" ? "Inspecting..." : "Inspect"}</button>
       </div>
     </section>

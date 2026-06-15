@@ -297,17 +297,71 @@ class PlatformCore:
                     raise
                 self._emit_status(status_callback, "Retrying analysis clone with GitHub token.")
                 self._run_command(["git", "clone", clone_url, str(repo_dir)])
-            self._run_command(["git", "-C", str(repo_dir), "checkout", git_revision])
+            actual_revision = self._checkout_git_revision(repo_dir, git_revision, status_callback=status_callback)
             components = self._detect_deployable_components(repo_dir)
             app_dir = repo_dir / components[0].path if components else self._detect_app_path(repo_dir)
             requirements = self._detect_service_requirements(app_dir)
             return {
                 "github_url": github_url,
-                "git_revision": git_revision,
+                "git_revision": actual_revision,
                 "app_path": str(app_dir.relative_to(repo_dir)),
                 "services": [asdict(req) for req in requirements],
                 "components": [asdict(component) for component in components],
             }
+
+
+    def _checkout_git_revision(
+        self,
+        repo_dir: Path,
+        git_revision: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        requested = (git_revision or "").strip()
+        if requested:
+            try:
+                self._run_command(["git", "-C", str(repo_dir), "checkout", requested])
+                return requested
+            except RuntimeError as exc:
+                if requested not in {"main", "master"}:
+                    raise
+                self._emit_status(
+                    status_callback,
+                    f"Git revision '{requested}' was not found; falling back to the repository default branch.",
+                )
+
+        default_branch = self._git_default_branch(repo_dir)
+        if not default_branch:
+            raise RuntimeError(f"Git revision '{requested or '<empty>'}' was not found and no default branch could be detected")
+        self._run_command(["git", "-C", str(repo_dir), "checkout", default_branch])
+        return default_branch
+
+    def _git_default_branch(self, repo_dir: Path) -> str:
+        commands = [
+            ["git", "-C", str(repo_dir), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            ["git", "-C", str(repo_dir), "remote", "show", "origin"],
+        ]
+        try:
+            output = self._run_command(commands[0]).strip()
+            if output.startswith("origin/"):
+                return output.split("/", 1)[1]
+            if output:
+                return output
+        except RuntimeError:
+            pass
+        try:
+            output = self._run_command(commands[1])
+            match = re.search(r"HEAD branch:\s*(\S+)", output)
+            if match:
+                return match.group(1)
+        except RuntimeError:
+            pass
+        for candidate in ("main", "master"):
+            try:
+                self._run_command(["git", "-C", str(repo_dir), "rev-parse", "--verify", f"origin/{candidate}"])
+                return candidate
+            except RuntimeError:
+                continue
+        return ""
 
     @staticmethod
     def _validate_deployment_request(req: DeploymentRequest) -> None:
@@ -512,7 +566,7 @@ class PlatformCore:
                     raise
                 self._emit_status(status_callback, "Retrying clone with GitHub token.")
                 self._run_command(["git", "clone", clone_url, str(repo_dir)])
-            self._run_command(["git", "-C", str(repo_dir), "checkout", req.git_revision])
+            self._checkout_git_revision(repo_dir, req.git_revision, status_callback=status_callback)
             app_dir = self._safe_component_path(repo_dir, req.app_path)
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
