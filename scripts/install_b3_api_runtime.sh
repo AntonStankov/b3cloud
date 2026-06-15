@@ -28,6 +28,8 @@ require_env CLOUDFLARE_ZONE_ID
 require_env CLOUDFLARE_TUNNEL_ID
 require_env CF_ACCOUNT_ID
 
+LEGACY_USER_DOMAIN="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}"
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y \
@@ -136,8 +138,17 @@ http://$ADMIN_DOMAIN {
   reverse_proxy 127.0.0.1:9000
 }
 
-http://$USER_DOMAIN {
+http://$LEGACY_USER_DOMAIN {
   reverse_proxy 127.0.0.1:9001
+}
+
+http://$USER_DOMAIN {
+  @user_api path /api/v1* /apps* /deploy-jobs* /health
+  reverse_proxy @user_api 127.0.0.1:9001
+
+  root * $APP_DIR/Client/dist
+  try_files {path} /index.html
+  file_server
 }
 EOF
 

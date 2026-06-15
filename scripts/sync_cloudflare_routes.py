@@ -20,6 +20,7 @@ tunnel_id = env("CLOUDFLARE_TUNNEL_ID")
 account_id = os.environ.get("CF_ACCOUNT_ID", "")
 admin_domain = env("ADMIN_DOMAIN")
 user_domain = env("USER_DOMAIN")
+legacy_user_domain = os.environ.get("LEGACY_USER_DOMAIN") or f"old.{user_domain}"
 monitoring_domain = env("MONITORING_DOMAIN")
 admin_origin = env("ADMIN_ORIGIN")
 user_origin = env("USER_ORIGIN")
@@ -98,6 +99,7 @@ def upsert_proxied_a(hostname: str, ip_address: str) -> None:
 
 upsert_proxied_a(admin_domain, origin_host(admin_origin))
 upsert_proxied_a(user_domain, origin_host(user_origin))
+upsert_proxied_a(legacy_user_domain, origin_host(user_origin))
 upsert_cname(monitoring_domain)
 
 if account_id:
@@ -124,4 +126,7 @@ if account_id:
         {"config": {"ingress": filtered}},
     )
 
-print(f"Synced Cloudflare routes for {admin_domain}, {user_domain}, and {monitoring_domain}.")
+print(
+    "Synced Cloudflare routes for "
+    f"{admin_domain}, {user_domain}, {legacy_user_domain}, and {monitoring_domain}."
+)
