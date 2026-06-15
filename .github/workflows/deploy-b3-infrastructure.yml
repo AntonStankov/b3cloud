@@ -28,6 +28,8 @@ jobs:
       CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
       CLOUDFLARE_TUNNEL_ID: ${{ secrets.CLOUDFLARE_TUNNEL_ID }}
       CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      SUPABASE_URL: ${{ secrets.B3_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.B3_SUPABASE_ANON_KEY }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,6 +64,8 @@ jobs:
         env:
           VITE_API_BASE_URL: ""
           VITE_USE_MOCKS: "false"
+          VITE_SUPABASE_URL: ${{ secrets.B3_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.B3_SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
           npm ci
@@ -114,6 +118,8 @@ jobs:
             CLOUDFLARE_ZONE_ID="$CLOUDFLARE_ZONE_ID" \
             CLOUDFLARE_TUNNEL_ID="$CLOUDFLARE_TUNNEL_ID" \
             CF_ACCOUNT_ID="$CF_ACCOUNT_ID" \
+            SUPABASE_URL="$SUPABASE_URL" \
+            SUPABASE_ANON_KEY="$SUPABASE_ANON_KEY" \
             'bash -s' <<'REMOTE'
           set -euo pipefail
           mkdir -p /opt/b3cloud

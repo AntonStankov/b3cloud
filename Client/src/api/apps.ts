@@ -17,6 +17,7 @@ import type {
 
 export interface AnalyzeInput {
   github_url: string;
+  github_token?: string;
   git_revision?: string;
 }
 

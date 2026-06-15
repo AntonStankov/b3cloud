@@ -90,6 +90,7 @@ class DeploymentRequest:
     target_host: str
     registry_repo: str
     git_revision: str = "main"
+    github_token: Optional[str] = None
     app_path: str = "."
     port: int = 8080
     node_arch: Optional[str] = None  # "amd64" (CPX) or "arm64" (CAX)
@@ -272,9 +273,10 @@ class PlatformCore:
         self,
         github_url: str,
         git_revision: str = "main",
+        github_token: Optional[str] = None,
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, object]:
-        github_pat = os.getenv("B3CLOUD_GITHUB_PAT", "")
+        github_pat = github_token or os.getenv("B3CLOUD_GITHUB_PAT", "")
         with tempfile.TemporaryDirectory(prefix="b3cloud-analyze-") as tmpdir:
             repo_dir = Path(tmpdir) / "src"
             try:
@@ -460,7 +462,7 @@ class PlatformCore:
     ) -> str:
         registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
         registry_password = os.getenv("B3CLOUD_REGISTRY_PASSWORD", "")
-        github_pat = os.getenv("B3CLOUD_GITHUB_PAT", "")
+        github_pat = req.github_token or os.getenv("B3CLOUD_GITHUB_PAT", "")
         if not registry_username or not registry_password:
             raise RuntimeError("Server misconfigured: B3CLOUD_REGISTRY_USERNAME or B3CLOUD_REGISTRY_PASSWORD is not set")
 

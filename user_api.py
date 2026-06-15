@@ -61,6 +61,7 @@ class ComponentDeployIn(BaseModel):
 
 class AppDeployIn(BaseModel):
     github_url: str
+    github_token: Optional[str] = None
     env: Dict[str, str] = Field(default_factory=dict)
     git_revision: str = "main"
     port: int = 8080
@@ -75,6 +76,7 @@ class AppDeployIn(BaseModel):
 
 class RepoAnalyzeIn(BaseModel):
     github_url: str
+    github_token: Optional[str] = None
     git_revision: str = "main"
 
 
@@ -121,12 +123,42 @@ class UserApi:
         self.core = PlatformCore(kubeconfig=kubeconfig)
         self.jobs = DeployJobStore()
         self.accounts = AccountStore()
+        self.supabase_url = os.getenv("B3CLOUD_SUPABASE_URL", "").rstrip("/")
+        self.supabase_anon_key = os.getenv("B3CLOUD_SUPABASE_ANON_KEY", "")
 
-    def auth(self, x_api_key: Optional[str]) -> None:
-        if not self.api_key:
-            raise HTTPException(status_code=500, detail="Server misconfigured: B3CLOUD_USER_API_KEY is not set")
-        if x_api_key != self.api_key:
+    def auth(self, x_api_key: Optional[str], authorization: Optional[str] = None) -> Dict[str, object]:
+        if x_api_key and self.api_key and x_api_key == self.api_key:
+            return {"id": "api-key", "email": "api-key@local", "name": "API Key", "github": {}}
+        if authorization and authorization.lower().startswith("bearer "):
+            return self._verify_supabase_token(authorization.split(" ", 1)[1].strip())
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    def _verify_supabase_token(self, token: str) -> Dict[str, object]:
+        if not self.supabase_url or not self.supabase_anon_key:
+            raise HTTPException(status_code=500, detail="Server misconfigured: Supabase auth is not configured")
+        req = urlrequest.Request(
+            f"{self.supabase_url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": self.supabase_anon_key,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlrequest.urlopen(req, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urlerror.HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise HTTPException(status_code=401, detail="Unauthorized") from exc
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise HTTPException(status_code=502, detail=f"Supabase auth verification failed: {detail}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Supabase auth verification failed: {exc}") from exc
+        user_id = str(payload.get("id") or payload.get("sub") or "")
+        email = str(payload.get("email") or "")
+        if not user_id:
             raise HTTPException(status_code=401, detail="Unauthorized")
+        return {"id": user_id, "email": email, "name": email.split("@", 1)[0] if email else "", "github": {}}
 
     def defaults_from_github_url(self, github_url: str) -> Dict[str, str]:
         if not self.cluster_domain:
@@ -538,6 +570,7 @@ def _deploy_component(
         analysis = svc.core.analyze_repository(
             payload.github_url,
             git_revision=payload.git_revision,
+            github_token=payload.github_token,
             status_callback=lambda message: svc.jobs.append_log(job_id, message),
         )
         component_analysis = next(
@@ -599,6 +632,7 @@ def _deploy_component(
         public=bool(defaults.get("deploy_public", component.public)),
         redeploy_backing_services=bool(payload.redeploy_services or component.redeploy_services),
         autoscaling=_autoscaling_config(component.autoscaling or payload.autoscaling),
+        github_token=payload.github_token,
     )
     result = svc.core.new_deployment(req, status_callback=lambda message: svc.jobs.append_log(job_id, message))
     result.update(
@@ -1275,8 +1309,9 @@ def v1_deployment_domains(deployment_id: str, request: Request, x_api_key: Optio
 def list_apps(
     namespace: Optional[str] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
 ) -> List[Dict[str, str]]:
-    svc.auth(x_api_key)
+    svc.auth(x_api_key, authorization)
     deployments = (
         svc.core.apps.list_namespaced_deployment(namespace).items
         if namespace
@@ -1299,17 +1334,25 @@ def list_apps(
 
 
 @app.post("/apps/analyze")
-def analyze_app(payload: RepoAnalyzeIn, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    svc.auth(x_api_key)
+def analyze_app(
+    payload: RepoAnalyzeIn,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key, authorization)
     defaults = svc.defaults_from_github_url(payload.github_url)
-    analysis = svc.core.analyze_repository(payload.github_url, payload.git_revision)
+    analysis = svc.core.analyze_repository(payload.github_url, payload.git_revision, github_token=payload.github_token)
     analysis.update(defaults)
     return analysis
 
 
 @app.post("/apps/deploy")
-def deploy_app(payload: AppDeployIn, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    svc.auth(x_api_key)
+def deploy_app(
+    payload: AppDeployIn,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key, authorization)
     defaults = svc.defaults_from_github_url(payload.github_url)
     job = svc.jobs.create_job(payload, defaults)
     threading.Thread(
@@ -1322,14 +1365,21 @@ def deploy_app(payload: AppDeployIn, x_api_key: Optional[str] = Header(default=N
 
 
 @app.get("/deploy-jobs")
-def list_deploy_jobs(x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
-    svc.auth(x_api_key)
+def list_deploy_jobs(
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    svc.auth(x_api_key, authorization)
     return svc.jobs.list_jobs()
 
 
 @app.get("/deploy-jobs/{job_id}")
-def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    svc.auth(x_api_key)
+def get_deploy_job(
+    job_id: str,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key, authorization)
     job = svc.jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
@@ -1338,8 +1388,13 @@ def get_deploy_job(job_id: str, x_api_key: Optional[str] = Header(default=None))
 
 
 @app.get("/apps/{namespace}/{app_name}")
-def app_status(namespace: str, app_name: str, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    svc.auth(x_api_key)
+def app_status(
+    namespace: str,
+    app_name: str,
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    svc.auth(x_api_key, authorization)
     try:
         dep = _active_app_deployment(namespace, app_name)
     except ApiException as exc:
@@ -1370,8 +1425,9 @@ def app_runtime_logs(
     app_name: str,
     tail_lines: int = Query(default=160, ge=20, le=500),
     x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    svc.auth(x_api_key)
+    svc.auth(x_api_key, authorization)
     return _runtime_logs_for_component(namespace, app_name, app_name, tail_lines=tail_lines)
 
 
@@ -1384,8 +1440,9 @@ def app_container_logs(
     tail_lines: int = Query(default=200, ge=20, le=1000),
     previous: bool = Query(default=False),
     x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    svc.auth(x_api_key)
+    svc.auth(x_api_key, authorization)
     _ensure_pod_belongs_to_app(namespace, app_name, pod_name)
     return {
         "namespace": namespace,
@@ -1439,6 +1496,9 @@ def _github_request(url: str, payload: Optional[Dict[str, str]] = None, token: s
 
 
 def _require_user(request: Request, x_api_key: Optional[str]) -> Dict[str, object]:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return svc.auth(None, auth_header)
     if x_api_key and svc.api_key and x_api_key == svc.api_key:
         return {"id": "api-key", "email": "api-key@local", "name": "API Key", "github": {}}
     user = svc.accounts.user_for_token(_session_token(request))

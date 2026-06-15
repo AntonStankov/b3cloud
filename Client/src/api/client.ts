@@ -1,4 +1,4 @@
-import { API_BASE_URL, getApiKey } from "./config";
+import { API_BASE_URL, getApiKey, getBearerToken } from "./config";
 
 export class ApiError extends Error {
   status: number;
@@ -14,26 +14,30 @@ interface RequestOptions {
   body?: unknown;
   auth?: boolean;
   apiKey?: string;
+  bearerToken?: string;
 }
 
-// Thin fetch wrapper that injects X-Api-Key and normalizes errors, mirroring the
-// api() helper in user_ui/app.js.
 export async function request<T>(
   path: string,
   options: RequestOptions = {}
 ): Promise<T> {
-  const { method = "GET", body, auth = true, apiKey } = options;
+  const { method = "GET", body, auth = true, apiKey, bearerToken } = options;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
   if (auth) {
-    const key = apiKey ?? getApiKey();
-    if (!key) {
-      throw new ApiError("Set the user API key first.", 401);
+    const token = bearerToken ?? getBearerToken();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    } else {
+      const key = apiKey ?? getApiKey();
+      if (!key) {
+        throw new ApiError("Sign in before calling the platform API.", 401);
+      }
+      headers["X-Api-Key"] = key;
     }
-    headers["X-Api-Key"] = key;
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
