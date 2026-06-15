@@ -617,18 +617,19 @@ function toRepositorySummary(repo: GithubRepo): RepositorySummary {
 
 function analysisToServices(result: AnalyzeResult): DetectedService[] {
   const components = result.components.length ? result.components : [];
-  return components.map((component) => componentToService(component));
+  return components.map((component) => componentToService(component, result));
 }
 
-function componentToService(component: AnalyzedComponent): DetectedService {
+function componentToService(component: AnalyzedComponent, result: AnalyzeResult): DetectedService {
+  const weakGenericName = component.name === "app" && component.path === ".";
   return {
     id: `${component.path}-${component.name}`,
-    name: component.name,
+    name: weakGenericName ? result.app_name || result.repo_name || component.name : component.name,
     kind: inferKind(component),
     path: component.path,
     port: component.port,
-    confidence: component.port_confidence === "high" ? "high" : "medium",
-    framework: component.type,
+    confidence: component.port_confidence === "high" ? "high" : component.port_confidence === "default" ? "low" : "medium",
+    framework: inferFramework(component),
     buildCommand: component.type === "frontend" ? "npm run build" : "",
     outputDirectory: component.type === "frontend" ? "dist" : "",
     env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret })),
@@ -639,13 +640,21 @@ function componentToService(component: AnalyzedComponent): DetectedService {
 }
 
 function inferKind(component: AnalyzedComponent): ServiceKind {
-  const evidence = [...component.evidence, component.name, component.path].join(" ").toLowerCase();
+  const evidence = [...component.evidence, ...component.port_evidence, component.name, component.path].join(" ").toLowerCase();
   if (evidence.includes("next")) return "nextjs";
   if (component.type === "frontend") return "react";
   if (evidence.includes("python")) return "python";
-  if (evidence.includes("go")) return "go";
+  if (evidence.includes("go module") || evidence.includes("go.mod")) return "go";
   if (component.type === "worker") return "worker";
-  return "node";
+  if (evidence.includes("backend javascript") || evidence.includes("express") || evidence.includes("fastify") || evidence.includes("nestjs")) return "node";
+  return "unknown";
+}
+
+function inferFramework(component: AnalyzedComponent): string {
+  if (component.port_confidence === "default" && component.evidence.includes("deployable project marker")) {
+    return "Needs confirmation";
+  }
+  return component.type;
 }
 
 function jobToEvents(job: DeployJob): DeploymentEvent[] {

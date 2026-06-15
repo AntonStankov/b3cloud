@@ -2105,8 +2105,11 @@ class PlatformCore:
         if isinstance(scripts.get("start"), str):
             evidence.append("package.json start script")
             return "backend", evidence
+        if package_json.exists():
+            evidence.append("generic Node.js package; no web framework or start script detected")
+            return "worker", evidence
         evidence.append("deployable project marker")
-        return "backend", evidence
+        return "worker", evidence
 
     @staticmethod
     def _infer_build_env(app_dir: Path) -> Dict[str, str]:
