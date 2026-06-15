@@ -215,7 +215,11 @@ class PlatformCore:
                 sort_keys=True,
                 separators=(",", ":"),
             )
-            output_image = f"{req.registry_repo}/{req.app_name}:{self._short_hash(image_fingerprint)}"
+            output_image = self._image_ref(
+                req.registry_repo,
+                req.app_name,
+                self._short_hash(image_fingerprint),
+            )
             self._emit_status(status_callback, f"Starting build for '{req.app_name}' from {req.github_url}@{req.git_revision}.")
             ready_image = self._build_image_with_pack(req, output_image, status_callback=status_callback)
 
@@ -533,9 +537,8 @@ class PlatformCore:
         return output_image
 
     def _ensure_registry_seed_image(self, req: DeploymentRequest, env: Dict[str, str]) -> None:
-        registry_host = req.registry_repo.split("/")[0]
-        target_repo = f"{req.registry_repo}/{req.app_name}"
-        bootstrap_tag = f"{target_repo}:bootstrap"
+        registry_host = req.registry_repo.split("/")[0].lower()
+        bootstrap_tag = self._image_ref(req.registry_repo, req.app_name, "bootstrap")
 
         if registry_host != "ghcr.io":
             return
@@ -550,6 +553,12 @@ class PlatformCore:
         self._run_command(["docker", "tag", "docker.io/library/alpine:3.20", bootstrap_tag], env=env)
         self._run_command(["docker", "push", bootstrap_tag], env=env)
         self._run_command(["docker", "rmi", bootstrap_tag], env=env)
+
+    @staticmethod
+    def _image_ref(registry_repo: str, app_name: str, tag: str) -> str:
+        repo = registry_repo.strip().rstrip("/").lower()
+        name = sanitize_name(app_name)
+        return f"{repo}/{name}:{tag}"
 
     def _create_or_update_deployment(
         self,

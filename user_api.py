@@ -117,7 +117,7 @@ class UserApi:
         self.cluster_domain = os.getenv("B3CLOUD_CLUSTER_DOMAIN", "")
         self.registry_server = os.getenv("B3CLOUD_REGISTRY_SERVER", "")
         self.registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
-        self.registry_namespace = os.getenv("B3CLOUD_REGISTRY_NAMESPACE", self.registry_username.lower())
+        self.registry_namespace = os.getenv("B3CLOUD_REGISTRY_NAMESPACE", self.registry_username).lower()
         self.core = PlatformCore(kubeconfig=kubeconfig)
         self.jobs = DeployJobStore()
         self.accounts = AccountStore()
@@ -144,7 +144,7 @@ class UserApi:
             "app_name": safe_name,
             "namespace": safe_name,
             "domain": f"{safe_name}.{self.cluster_domain}",
-            "registry_repo": f"{self.registry_server}/{self.registry_namespace}",
+            "registry_repo": f"{self.registry_server.lower()}/{self.registry_namespace.lower()}",
         }
 
     def component_defaults(self, defaults: Dict[str, str], component: ComponentDeployIn, multi_component: bool) -> Dict[str, str]:
