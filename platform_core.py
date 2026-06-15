@@ -588,6 +588,7 @@ class PlatformCore:
             inferred_build_env = self._infer_build_env(app_dir)
             if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
                 self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
+            self._prepare_node_lockfile(app_dir, status_callback=status_callback)
             for key, value in inferred_build_env.items():
                 env[key] = value
                 cmd.extend(["--env", f"{key}={value}"])
@@ -2170,6 +2171,55 @@ class PlatformCore:
         PlatformCore._emit_status(
             status_callback,
             "Detected Vite frontend build with TypeScript precheck; using 'vite build' for deployment.",
+        )
+
+
+    @staticmethod
+    def _prepare_node_lockfile(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        package_json = app_dir / "package.json"
+        package_lock = app_dir / "package-lock.json"
+        if not package_json.exists() or not package_lock.exists():
+            return
+
+        try:
+            package_data = json.loads(package_json.read_text())
+            lock_data = json.loads(package_lock.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+
+        wanted: Dict[str, str] = {}
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            value = package_data.get(section, {})
+            if isinstance(value, dict):
+                wanted.update({str(k): str(v) for k, v in value.items()})
+        if not wanted:
+            return
+
+        lock_root = {}
+        if isinstance(lock_data.get("packages"), dict):
+            lock_root = lock_data["packages"].get("", {}) or {}
+        locked: Dict[str, str] = {}
+        for section in ("dependencies", "devDependencies", "optionalDependencies"):
+            value = lock_root.get(section, {}) if isinstance(lock_root, dict) else {}
+            if isinstance(value, dict):
+                locked.update({str(k): str(v) for k, v in value.items()})
+
+        missing = sorted(name for name in wanted if name not in locked)
+        changed = sorted(name for name, version in wanted.items() if name in locked and locked[name] != version)
+        if not missing and not changed:
+            return
+
+        ignored_path = app_dir / "package-lock.b3cloud-ignored.json"
+        package_lock.replace(ignored_path)
+        shown_missing = ", ".join(missing[:8]) or "none"
+        shown_changed = ", ".join(changed[:8]) or "none"
+        PlatformCore._emit_status(
+            status_callback,
+            "Detected package.json/package-lock.json mismatch; ignoring stale package-lock.json for this build "
+            f"so Buildpacks can run npm install. Missing: {shown_missing}. Changed: {shown_changed}.",
         )
 
     @staticmethod
