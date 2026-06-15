@@ -135,6 +135,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS "http://$USER_DOMAIN/health"
-          curl -fsS "http://${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}/health"
-          curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" "http://$ADMIN_DOMAIN/health"
+          legacy_domain="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}"
+
+          retry_curl() {
+            local url="$1"
+            shift
+            for attempt in $(seq 1 30); do
+              if curl -fsS --max-time 10 "$@" "$url"; then
+                return 0
+              fi
+              echo "Waiting for endpoint: $url ($attempt/30)"
+              sleep 5
+            done
+            curl -fsS --max-time 10 "$@" "$url"
+          }
+
+          retry_curl "http://$USER_DOMAIN/health" | grep -q '"status":"ok"'
+          retry_curl "http://$legacy_domain/health" | grep -q '"status":"ok"'
+          retry_curl "http://$ADMIN_DOMAIN/health" -H "X-Admin-Token: $ADMIN_TOKEN" | grep -q '"status":"ok"'

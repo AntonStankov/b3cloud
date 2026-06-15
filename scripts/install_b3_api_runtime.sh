@@ -143,12 +143,27 @@ http://$LEGACY_USER_DOMAIN {
 }
 
 http://$USER_DOMAIN {
-  @user_api path /api/v1* /apps* /deploy-jobs* /health
-  reverse_proxy @user_api 127.0.0.1:9001
+  handle /api/v1* {
+    reverse_proxy 127.0.0.1:9001
+  }
 
-  root * $APP_DIR/Client/dist
-  try_files {path} /index.html
-  file_server
+  handle /apps* {
+    reverse_proxy 127.0.0.1:9001
+  }
+
+  handle /deploy-jobs* {
+    reverse_proxy 127.0.0.1:9001
+  }
+
+  handle /health {
+    reverse_proxy 127.0.0.1:9001
+  }
+
+  handle {
+    root * $APP_DIR/Client/dist
+    try_files {path} /index.html
+    file_server
+  }
 }
 EOF
 
