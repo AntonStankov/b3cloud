@@ -22,6 +22,9 @@ export default function LandingPage() {
         <nav className={styles.navLinks}>
           <a href="#features">Features</a>
           <a href="#how">How it works</a>
+          <button className="btn btn-ghost btn-sm" onClick={() => navigate("/dashboard")}>
+            Dashboard
+          </button>
           <button
             className="btn btn-ghost btn-sm"
             onClick={() => setApiModalOpen(true)}

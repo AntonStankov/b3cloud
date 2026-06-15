@@ -10,6 +10,7 @@ import GraphCanvas from "./GraphCanvas";
 import PropertiesPanel from "./PropertiesPanel";
 import DeployProgress from "./DeployProgress";
 import PublishBar from "./PublishBar";
+import DeploySettings from "./DeploySettings";
 import styles from "./BuilderPage.module.css";
 
 interface BuilderLocationState {
@@ -74,6 +75,12 @@ export default function BuilderPage() {
         >
           {apiConnected ? "API connected" : "Connect API"}
         </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => navigate("/dashboard")}
+        >
+          Dashboard
+        </button>
         <StatusPill />
       </header>
 
@@ -122,6 +129,7 @@ export default function BuilderPage() {
           </ReactFlowProvider>
 
           <DeployProgress />
+          {status === "ready" && <DeploySettings />}
           {status === "ready" && <PublishBar />}
         </main>
 

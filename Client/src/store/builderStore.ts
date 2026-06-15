@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { analyze, deploy, getJob } from "../api/apps";
-import type { DeployJob } from "../api/types";
+import type { DeployJob, ResourceLimits } from "../api/types";
 import {
   createPaletteElement,
   fromAnalyze,
@@ -33,8 +33,17 @@ interface BuilderState {
   deployJobId: string | null;
   job: DeployJob | null;
   deployError: string | null;
+  nodeArch: "any" | "amd64" | "arm64";
+  redeployServices: boolean;
+  globalEnvJson: string;
+  resourceLimits: ResourceLimits;
 
   loadProject: (projectId: string, githubUrl: string, revision?: string) => Promise<void>;
+  startDeploy: () => Promise<void>;
+  setDeployOption: <K extends "nodeArch" | "redeployServices" | "globalEnvJson" | "resourceLimits">(
+    key: K,
+    value: BuilderState[K]
+  ) => void;
   select: (id: string | null) => void;
   updateElement: (id: string, patch: Partial<InfraElement>) => void;
   updateEnvValue: (id: string, name: string, value: string) => void;
@@ -69,6 +78,10 @@ function toDeployInput(state: {
   githubUrl: string;
   gitRevision: string;
   elements: InfraElement[];
+  nodeArch: "any" | "amd64" | "arm64";
+  redeployServices: boolean;
+  globalEnvJson: string;
+  resourceLimits: ResourceLimits;
 }): DeployInput {
   const componentElements = state.elements.filter(
     (element) => element.componentType
@@ -88,24 +101,29 @@ function toDeployInput(state: {
       port: element.port ?? 8080,
       auto_detect_services: element.componentType !== "frontend",
       provision_services: element.serviceTypes,
+      redeploy_services: state.redeployServices,
       env,
     };
   });
+  const globalEnv = parseJsonObject(state.globalEnvJson, "Global environment JSON");
 
   return {
     github_url: state.githubUrl,
     git_revision: state.gitRevision,
     port: 8080,
-    node_arch: null,
+    node_arch: state.nodeArch === "any" ? null : state.nodeArch,
     auto_detect_services: true,
     provision_services: [],
+    redeploy_services: state.redeployServices,
     components,
-    env: {},
-    resources: {
-      cpu_request: "100m",
-      cpu_limit: "500m",
-      memory_request: "128Mi",
-      memory_limit: "512Mi",
+    env: globalEnv,
+    resources: state.resourceLimits,
+    autoscaling: {
+      enabled: true,
+      min_replicas: 1,
+      max_replicas: 5,
+      target_cpu_utilization: 80,
+      target_memory_utilization: 80,
     },
   };
 }
@@ -125,6 +143,15 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   deployJobId: null,
   job: null,
   deployError: null,
+  nodeArch: "any",
+  redeployServices: false,
+  globalEnvJson: "",
+  resourceLimits: {
+    cpu_request: "100m",
+    cpu_limit: "500m",
+    memory_request: "128Mi",
+    memory_limit: "512Mi",
+  },
 
   async loadProject(projectId, githubUrl, revision = "main") {
     // Avoid re-running if the same project is already loaded.
@@ -161,28 +188,41 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
         status: "ready",
       });
 
-      // Auto-kick a deploy job ("the algorithm will have already deployed something").
-      try {
-        const job = await deploy(
-          toDeployInput({
-            githubUrl,
-            gitRevision: revision,
-            elements: graph.elements,
-          })
-        );
-        set({
-          deployJobId: job.job_id,
-          job,
-          elements: get().elements.map((el) =>
-            el.deployable ? { ...el, status: "deploying" } : el
-          ),
-        });
-      } catch (error) {
-        set({ deployError: errorMessage(error) });
-      }
     } catch (error) {
       set({ status: "error", analyzeError: errorMessage(error) });
     }
+  },
+
+  async startDeploy() {
+    const state = get();
+    if (!state.githubUrl || state.elements.length === 0) return;
+    set({ deployError: null });
+    try {
+      const job = await deploy(
+        toDeployInput({
+          githubUrl: state.githubUrl,
+          gitRevision: state.gitRevision,
+          elements: state.elements,
+          nodeArch: state.nodeArch,
+          redeployServices: state.redeployServices,
+          globalEnvJson: state.globalEnvJson,
+          resourceLimits: state.resourceLimits,
+        })
+      );
+      set({
+        deployJobId: job.job_id,
+        job,
+        elements: get().elements.map((el) =>
+          el.deployable ? { ...el, status: "deploying" } : el
+        ),
+      });
+    } catch (error) {
+      set({ deployError: errorMessage(error) });
+    }
+  },
+
+  setDeployOption(key, value) {
+    set({ [key]: value } as Pick<BuilderState, typeof key>);
   },
 
   select(id) {
@@ -273,10 +313,31 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       job: null,
       analyzeError: null,
       deployError: null,
+      nodeArch: "any",
+      redeployServices: false,
+      globalEnvJson: "",
+      resourceLimits: {
+        cpu_request: "100m",
+        cpu_limit: "500m",
+        memory_request: "128Mi",
+        memory_limit: "512Mi",
+      },
     });
   },
 }));
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function parseJsonObject(raw: string, label: string): Record<string, string> {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error(`${label} must be a JSON object.`);
+  }
+  return Object.fromEntries(
+    Object.entries(parsed).map(([key, value]) => [key, String(value)])
+  );
 }

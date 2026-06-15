@@ -1,0 +1,52 @@
+.panel {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  z-index: 6;
+  width: min(430px, calc(100% - 40px));
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.head h3 {
+  font-size: 1rem;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.textarea {
+  min-height: 76px;
+}
+
+.toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.toggle input {
+  width: auto;
+  margin-top: 3px;
+}
+
+@media (max-width: 880px) {
+  .panel {
+    position: static;
+    width: auto;
+    margin: 12px;
+  }
+}

@@ -1,5 +1,4 @@
 import { useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import Icon from "../../components/Icon";
 import { useBuilderStore } from "../../store/builderStore";
 import { computePricing, formatUsd } from "../../domain/pricing";
@@ -8,27 +7,24 @@ import styles from "./PublishBar.module.css";
 
 export default function PublishBar() {
   const elements = useBuilderStore((s) => s.elements);
-  const githubUrl = useBuilderStore((s) => s.githubUrl);
-  const navigate = useNavigate();
+  const job = useBuilderStore((s) => s.job);
+  const deployError = useBuilderStore((s) => s.deployError);
+  const startDeploy = useBuilderStore((s) => s.startDeploy);
 
   const pricing = useMemo(() => computePricing(elements), [elements]);
   const validation = useMemo(() => validateGraph(elements), [elements]);
 
-  const publish = () => {
+  const publish = async () => {
     if (validation.totalWarnings > 0) {
       const ok = window.confirm(
         `${validation.totalWarnings} item(s) still need attention. Publish anyway?`
       );
       if (!ok) return;
     }
-    navigate("/subscribe", {
-      state: {
-        lineItems: pricing.lineItems,
-        monthlyTotalCents: pricing.monthlyTotalCents,
-        githubUrl,
-      },
-    });
+    await startDeploy();
   };
+
+  const deploying = job?.status === "queued" || job?.status === "running";
 
   return (
     <div className={`card ${styles.bar}`}>
@@ -41,6 +37,7 @@ export default function PublishBar() {
           <strong className={styles.free}>$0.00</strong>
         </div>
         <span className={styles.trial}>Free for your first 5 days</span>
+        {deployError && <span className={styles.error}>{deployError}</span>}
       </div>
 
       <div className={styles.actions}>
@@ -53,9 +50,9 @@ export default function PublishBar() {
         <button
           className="btn btn-accent"
           onClick={publish}
-          disabled={elements.length === 0}
+          disabled={elements.length === 0 || deploying}
         >
-          Publish
+          {deploying ? "Deploying" : "Deploy"}
           <Icon name="arrow" size={18} />
         </button>
       </div>

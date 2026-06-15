@@ -41,6 +41,11 @@
   color: var(--accent);
   font-weight: 600;
 }
+.error {
+  max-width: 340px;
+  color: var(--warn);
+  font-size: 0.78rem;
+}
 
 .actions {
   display: flex;

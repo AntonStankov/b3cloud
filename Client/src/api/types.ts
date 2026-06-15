@@ -59,6 +59,14 @@ export interface ResourceLimits {
   memory_limit: string;
 }
 
+export interface AutoscalingInput {
+  enabled: boolean;
+  min_replicas: number;
+  max_replicas: number;
+  target_cpu_utilization: number;
+  target_memory_utilization: number;
+}
+
 export interface ComponentDeployInput {
   name: string;
   path: string;
@@ -67,6 +75,8 @@ export interface ComponentDeployInput {
   port: number;
   auto_detect_services: boolean;
   provision_services: string[];
+  redeploy_services?: boolean;
+  autoscaling?: AutoscalingInput | null;
   env: Record<string, string>;
 }
 
@@ -77,9 +87,11 @@ export interface DeployInput {
   node_arch: string | null;
   auto_detect_services: boolean;
   provision_services: string[];
+  redeploy_services?: boolean;
   components: ComponentDeployInput[];
   env: Record<string, string>;
   resources: ResourceLimits;
+  autoscaling?: AutoscalingInput;
 }
 
 export type DeployJobStatus =
@@ -109,4 +121,37 @@ export interface AppSummary {
   replicas: string;
   ready_replicas: string;
   image: string;
+}
+
+export interface AppStatus extends AppSummary {
+  deployment_name?: string;
+  status: string;
+  autoscaling?: Record<string, unknown>;
+}
+
+export interface RuntimeContainerLog {
+  name: string;
+  ready: boolean;
+  restarts: number;
+  state: string;
+  current_logs: string;
+  previous_logs?: string;
+  error_line?: string;
+}
+
+export interface RuntimePodLog {
+  name: string;
+  phase: string;
+  containers: RuntimeContainerLog[];
+}
+
+export interface RuntimeLogBundle {
+  namespace: string;
+  app_name: string;
+  component_name?: string;
+  status: string;
+  ready_replicas: number;
+  replicas: number;
+  pods: RuntimePodLog[];
+  error_summary?: string;
 }
