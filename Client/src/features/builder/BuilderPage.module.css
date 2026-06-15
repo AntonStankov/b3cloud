@@ -1,0 +1,133 @@
+.page {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+.back {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+}
+.project {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.project strong {
+  font-size: 0.98rem;
+}
+.repo {
+  font-size: 0.76rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+}
+
+.pill {
+  margin-left: auto;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 999px;
+}
+.pillDraft {
+  background: rgba(26, 36, 38, 0.08);
+  color: var(--muted);
+}
+.pillBusy {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.pillOk {
+  background: rgba(29, 107, 88, 0.16);
+  color: var(--accent-strong);
+}
+.pillErr {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.canvasWrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+}
+
+.analyzing {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(246, 242, 234, 0.7);
+  backdrop-filter: blur(3px);
+}
+.analyzingCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  padding: 30px 36px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--accent-strong);
+  max-width: 360px;
+}
+.analyzingCard span {
+  color: var(--muted);
+}
+.errIcon {
+  color: var(--warn);
+}
+
+.fallback {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+}
+
+@media (max-width: 1024px) {
+  .repo {
+    display: none;
+  }
+}

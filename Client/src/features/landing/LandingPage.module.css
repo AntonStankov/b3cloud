@@ -1,0 +1,112 @@
+.page {
+  width: min(1100px, calc(100% - 40px));
+  margin: 0 auto;
+  padding-bottom: 80px;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 0;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+}
+
+.navLinks {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  font-weight: 500;
+}
+.navLinks a {
+  color: var(--muted);
+}
+.navLinks a:hover {
+  color: var(--ink);
+}
+
+.hero {
+  text-align: center;
+  padding: 70px 0 60px;
+  max-width: 760px;
+  margin: 0 auto;
+}
+.title {
+  font-size: clamp(2.4rem, 6vw, 4rem);
+  line-height: 1.02;
+  margin: 18px 0;
+}
+.subtitle {
+  font-size: 1.12rem;
+  color: var(--muted);
+  max-width: 620px;
+  margin: 0 auto;
+  line-height: 1.55;
+}
+
+.ctas {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  margin-top: 34px;
+}
+
+.trustRow {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 22px;
+  font-size: 0.9rem;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin-top: 40px;
+}
+.feature {
+  padding: 24px;
+}
+.feature h3 {
+  margin: 14px 0 8px;
+  font-size: 1.05rem;
+}
+.featureIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+@media (max-width: 820px) {
+  .features {
+    grid-template-columns: 1fr;
+  }
+  .navLinks a {
+    display: none;
+  }
+}
