@@ -180,8 +180,8 @@ function DeploymentExperience() {
       const result = await analyze({ github_url: repository.url, git_revision: repository.defaultBranch, github_token: githubToken || undefined });
       dispatch({ type: "SET_SERVICES", services: analysisToServices(result) });
     } catch (err) {
-      setError(readError(err));
-      dispatch({ type: "SET_SERVICES", services: demoServices(repository) });
+      setError(`Repository inspection failed: ${readError(err)}`);
+      dispatch({ type: "SET_STEP", step: "source" });
     } finally {
       setBusy("");
     }
@@ -237,7 +237,7 @@ function DeploymentExperience() {
           public: true,
           port: service.port ?? 8080,
           auto_detect_services: true,
-          provision_services: service.kind === "postgres" || service.kind === "redis" ? [service.kind] : [],
+          provision_services: service.dependencies.filter((dependency) => ["postgres", "mysql", "mongodb", "redis", "rabbitmq"].includes(dependency)),
           redeploy_services: false,
           env: Object.fromEntries(service.env.map((item) => [item.key, item.value]).filter(([key]) => key)),
         })),
@@ -646,14 +646,6 @@ function inferKind(component: AnalyzedComponent): ServiceKind {
   if (evidence.includes("go")) return "go";
   if (component.type === "worker") return "worker";
   return "node";
-}
-
-function demoServices(repository: RepositorySummary): DetectedService[] {
-  return [
-    { id: "web", name: "Web", kind: "nextjs", path: "apps/web", port: 3000, confidence: "high", framework: "Next.js", buildCommand: "npm run build", outputDirectory: ".next", env: [], instanceSize: "micro", monthlyEstimateUsd: 9, dependencies: ["api"] },
-    { id: "api", name: "API", kind: repository.language?.toLowerCase() === "python" ? "python" : "node", path: "apps/api", port: 8080, confidence: "high", framework: "HTTP service", buildCommand: "npm run build", outputDirectory: "dist", env: [{ id: "database", key: "DATABASE_URL", value: "", secret: true }], instanceSize: "standard", monthlyEstimateUsd: 18, dependencies: ["postgres"] },
-    { id: "postgres", name: "PostgreSQL", kind: "postgres", path: "managed/postgres", port: 5432, confidence: "medium", framework: "Managed service", env: [], instanceSize: "micro", monthlyEstimateUsd: 12, dependencies: [] },
-  ];
 }
 
 function jobToEvents(job: DeployJob): DeploymentEvent[] {
