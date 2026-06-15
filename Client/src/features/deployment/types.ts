@@ -1,0 +1,80 @@
+export type FlowStep =
+  | "landing"
+  | "onboarding"
+  | "source"
+  | "intelligence"
+  | "blueprint"
+  | "ignition"
+  | "dashboard";
+
+export type DeploymentStatus = "queued" | "provisioning" | "building" | "routing" | "ready" | "failed";
+
+export type ServiceKind =
+  | "nextjs"
+  | "react"
+  | "node"
+  | "python"
+  | "go"
+  | "postgres"
+  | "redis"
+  | "worker"
+  | "static"
+  | "unknown";
+
+export type InstanceSize = "nano" | "micro" | "standard" | "performance";
+
+export interface WorkspaceDraft {
+  name: string;
+  plan: "starter" | "pro" | "scale";
+}
+
+export interface RepositorySummary {
+  id: string;
+  fullName: string;
+  url: string;
+  defaultBranch: string;
+  private: boolean;
+  language?: string;
+  updatedAt?: string;
+  isMonorepo?: boolean;
+}
+
+export interface EnvVarPair {
+  id: string;
+  key: string;
+  value: string;
+  secret: boolean;
+}
+
+export interface DetectedService {
+  id: string;
+  name: string;
+  kind: ServiceKind;
+  path: string;
+  port?: number;
+  confidence: "high" | "medium" | "low";
+  framework?: string;
+  buildCommand?: string;
+  outputDirectory?: string;
+  env: EnvVarPair[];
+  instanceSize: InstanceSize;
+  monthlyEstimateUsd: number;
+  dependencies: string[];
+}
+
+export interface DeploymentEvent {
+  id: string;
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error" | "success";
+  message: string;
+  serviceId?: string;
+  ansi?: string;
+}
+
+export interface DeploymentProgress {
+  deploymentId?: string;
+  status: DeploymentStatus;
+  currentStep: number;
+  productionUrl?: string;
+  events: DeploymentEvent[];
+}
