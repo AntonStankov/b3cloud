@@ -1,0 +1,29 @@
+.copy {
+  margin-bottom: 16px;
+  line-height: 1.45;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.status {
+  font-size: 0.86rem;
+}
+
+.ok {
+  color: var(--ok);
+}
+
+.error {
+  color: var(--warn);
+}

@@ -1,11 +1,15 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import ApiKeyModal from "../../components/ApiKeyModal";
 import Icon from "../../components/Icon";
+import { hasApiKey } from "../../api/config";
 import LinkRepoModal from "./LinkRepoModal";
 import styles from "./LandingPage.module.css";
 
 export default function LandingPage() {
   const [modalOpen, setModalOpen] = useState(false);
+  const [apiModalOpen, setApiModalOpen] = useState(false);
+  const [apiConnected, setApiConnected] = useState(hasApiKey());
   const navigate = useNavigate();
 
   return (
@@ -18,6 +22,12 @@ export default function LandingPage() {
         <nav className={styles.navLinks}>
           <a href="#features">Features</a>
           <a href="#how">How it works</a>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setApiModalOpen(true)}
+          >
+            {apiConnected ? "API connected" : "Connect API"}
+          </button>
           <button className="btn btn-ghost btn-sm" onClick={() => navigate("/demo")}>
             See demo
           </button>
@@ -71,6 +81,12 @@ export default function LandingPage() {
         onLinked={(projectId, githubUrl) =>
           navigate(`/builder/${projectId}`, { state: { githubUrl } })
         }
+        onApiKeySaved={() => setApiConnected(hasApiKey())}
+      />
+      <ApiKeyModal
+        open={apiModalOpen}
+        onClose={() => setApiModalOpen(false)}
+        onSaved={() => setApiConnected(hasApiKey())}
       />
     </div>
   );

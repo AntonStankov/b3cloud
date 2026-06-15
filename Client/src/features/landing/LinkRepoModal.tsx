@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import Modal from "../../components/Modal";
 import Icon from "../../components/Icon";
+import { validateApiKey } from "../../api/client";
+import { getApiKey, setApiKey } from "../../api/config";
 import { isValidRepoUrl, listRepos, type GithubRepo } from "../../api/mocks/github";
 import { startTrialSession } from "../../api/mocks/auth";
 import styles from "./LinkRepoModal.module.css";
@@ -9,6 +11,7 @@ interface LinkRepoModalProps {
   open: boolean;
   onClose: () => void;
   onLinked: (projectId: string, githubUrl: string) => void;
+  onApiKeySaved?: () => void;
 }
 
 function projectIdFromUrl(githubUrl: string): string {
@@ -22,28 +25,54 @@ function projectIdFromUrl(githubUrl: string): string {
   return `${slug || "app"}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-export default function LinkRepoModal({ open, onClose, onLinked }: LinkRepoModalProps) {
+export default function LinkRepoModal({
+  open,
+  onClose,
+  onLinked,
+  onApiKeySaved,
+}: LinkRepoModalProps) {
   const [url, setUrl] = useState("");
+  const [apiKey, setApiKeyValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [repos, setRepos] = useState<GithubRepo[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
+  const [linking, setLinking] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    setApiKeyValue(getApiKey());
+    setError(null);
     setLoadingRepos(true);
     listRepos()
       .then(setRepos)
       .finally(() => setLoadingRepos(false));
   }, [open]);
 
-  const link = (githubUrl: string) => {
+  const link = async (githubUrl: string) => {
     if (!isValidRepoUrl(githubUrl)) {
       setError("Enter a valid GitHub repository URL.");
       return;
     }
-    // A future GitHub App flow would replace this. For now we open a trial session.
-    startTrialSession();
-    onLinked(projectIdFromUrl(githubUrl), githubUrl.trim());
+    const key = apiKey.trim();
+    if (!key) {
+      setError("Paste the b3cloud user API key before testing a real deploy.");
+      return;
+    }
+
+    setLinking(true);
+    setError(null);
+    try {
+      await validateApiKey(key);
+      setApiKey(key);
+      onApiKeySaved?.();
+      // A future GitHub App flow would replace this. For now we open a trial session.
+      startTrialSession();
+      onLinked(projectIdFromUrl(githubUrl), githubUrl.trim());
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLinking(false);
+    }
   };
 
   return (
@@ -51,6 +80,20 @@ export default function LinkRepoModal({ open, onClose, onLinked }: LinkRepoModal
       <p className="muted" style={{ marginBottom: 16 }}>
         We&apos;ll analyze the repo and lay out your infrastructure in the builder.
       </p>
+
+      <label className={`field ${styles.apiKeyField}`}>
+        <span>User API key</span>
+        <input
+          className="input mono"
+          type="password"
+          placeholder="Required for the live b3cloud API"
+          value={apiKey}
+          onChange={(event) => {
+            setApiKeyValue(event.target.value);
+            setError(null);
+          }}
+        />
+      </label>
 
       <form
         className={styles.urlForm}
@@ -72,8 +115,9 @@ export default function LinkRepoModal({ open, onClose, onLinked }: LinkRepoModal
             autoFocus
           />
         </label>
-        <button type="submit" className="btn btn-accent">
-          Continue
+        <button type="submit" className="btn btn-accent" disabled={linking}>
+          {linking && <Icon name="spinner" size={16} />}
+          {linking ? "Testing..." : "Continue"}
         </button>
       </form>
       {error && <p className={styles.error}>{error}</p>}
@@ -89,6 +133,7 @@ export default function LinkRepoModal({ open, onClose, onLinked }: LinkRepoModal
             <button
               key={repo.id}
               className={styles.repoRow}
+              disabled={linking}
               onClick={() => link(repo.html_url)}
             >
               <span className={styles.repoIcon}>

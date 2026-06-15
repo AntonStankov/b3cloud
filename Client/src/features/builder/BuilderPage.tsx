@@ -1,7 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ReactFlowProvider } from "@xyflow/react";
+import ApiKeyModal from "../../components/ApiKeyModal";
 import Icon from "../../components/Icon";
+import { hasApiKey } from "../../api/config";
 import { useBuilderStore } from "../../store/builderStore";
 import ElementPalette from "./ElementPalette";
 import GraphCanvas from "./GraphCanvas";
@@ -19,6 +21,8 @@ export default function BuilderPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const githubUrl = (location.state as BuilderLocationState | null)?.githubUrl;
+  const [apiModalOpen, setApiModalOpen] = useState(false);
+  const [apiConnected, setApiConnected] = useState(hasApiKey());
 
   const status = useBuilderStore((s) => s.status);
   const analyzeError = useBuilderStore((s) => s.analyzeError);
@@ -64,6 +68,12 @@ export default function BuilderPage() {
           <strong>{projectId}</strong>
           <span className={`mono ${styles.repo}`}>{storeGithubUrl || githubUrl}</span>
         </div>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => setApiModalOpen(true)}
+        >
+          {apiConnected ? "API connected" : "Connect API"}
+        </button>
         <StatusPill />
       </header>
 
@@ -97,6 +107,12 @@ export default function BuilderPage() {
                 >
                   Retry
                 </button>
+                <button
+                  className="btn btn-accent btn-sm"
+                  onClick={() => setApiModalOpen(true)}
+                >
+                  Set API key
+                </button>
               </div>
             </div>
           )}
@@ -111,6 +127,11 @@ export default function BuilderPage() {
 
         <PropertiesPanel />
       </div>
+      <ApiKeyModal
+        open={apiModalOpen}
+        onClose={() => setApiModalOpen(false)}
+        onSaved={() => setApiConnected(hasApiKey())}
+      />
     </div>
   );
 }

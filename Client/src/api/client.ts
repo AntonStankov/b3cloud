@@ -13,6 +13,7 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   auth?: boolean;
+  apiKey?: string;
 }
 
 // Thin fetch wrapper that injects X-Api-Key and normalizes errors, mirroring the
@@ -21,14 +22,14 @@ export async function request<T>(
   path: string,
   options: RequestOptions = {}
 ): Promise<T> {
-  const { method = "GET", body, auth = true } = options;
+  const { method = "GET", body, auth = true, apiKey } = options;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
   if (auth) {
-    const key = getApiKey();
+    const key = apiKey ?? getApiKey();
     if (!key) {
       throw new ApiError("Set the user API key first.", 401);
     }
@@ -60,6 +61,10 @@ export async function request<T>(
   }
 
   return data as T;
+}
+
+export async function validateApiKey(apiKey: string): Promise<void> {
+  await request<unknown[]>("/apps", { apiKey });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

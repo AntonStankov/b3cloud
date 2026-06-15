@@ -17,7 +17,11 @@ export function getApiKey(): string {
 }
 
 export function setApiKey(value: string): void {
-  localStorage.setItem(API_KEY_STORAGE, value);
+  localStorage.setItem(API_KEY_STORAGE, value.trim());
+}
+
+export function clearApiKey(): void {
+  localStorage.removeItem(API_KEY_STORAGE);
 }
 
 export function hasApiKey(): boolean {
