@@ -1613,8 +1613,10 @@ class PlatformCore:
         if not candidates:
             candidates = [repo_dir]
 
+        candidates = cls._filter_delegating_parent_components(repo_dir, sorted(set(candidates)))
+
         components: list[DeployableComponent] = []
-        for path in sorted(set(candidates), key=lambda item: (len(item.relative_to(repo_dir).parts), str(item))):
+        for path in sorted(candidates, key=lambda item: (len(item.relative_to(repo_dir).parts), str(item))):
             rel = "." if path == repo_dir else str(path.relative_to(repo_dir))
             name = sanitize_name(path.name if rel != "." else "app") or "app"
             component_type, evidence = cls._classify_component(path)
@@ -1636,6 +1638,44 @@ class PlatformCore:
                 )
             )
         return components
+
+    @staticmethod
+    def _filter_delegating_parent_components(repo_dir: Path, candidates: list[Path]) -> list[Path]:
+        candidate_set = set(candidates)
+        filtered: list[Path] = []
+        for path in candidates:
+            has_child_candidate = any(
+                other != path and path in other.parents for other in candidate_set
+            )
+            if has_child_candidate and PlatformCore._is_delegating_package(path):
+                continue
+            filtered.append(path)
+        return filtered or candidates
+
+    @staticmethod
+    def _is_delegating_package(path: Path) -> bool:
+        package_json = path / "package.json"
+        if not package_json.exists():
+            return False
+        try:
+            package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        scripts = package_data.get("scripts", {})
+        dependencies = package_data.get("dependencies", {})
+        optional_dependencies = package_data.get("optionalDependencies", {})
+        if dependencies or optional_dependencies:
+            return False
+        if not isinstance(scripts, dict) or not scripts:
+            return False
+
+        script_values = " && ".join(
+            value for value in scripts.values() if isinstance(value, str)
+        )
+        delegates_to_children = bool(re.search(r"(?:^|\s)(?:--prefix|--workspace|-w)\s+\S+", script_values))
+        has_direct_start = isinstance(scripts.get("start"), str) and "--prefix" not in scripts["start"]
+        return delegates_to_children and not has_direct_start
 
     @staticmethod
     def _detect_env_requirements(app_dir: Path) -> list[EnvRequirement]:
