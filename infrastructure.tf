@@ -303,11 +303,15 @@ resource "hcloud_server" "worker_pool_cpx" {
 
   user_data = templatefile("${path.module}/templates/k3s-worker-cloudinit.tftpl", {
     token       = "replace-with-secure-token"
-    server_ip   = local.control_plane_ips[0]
+    server_ip   = hcloud_server.control_plane[0].ipv4_address
     k3s_version = var.k3s_version
     nodepool    = "cpx"
     arch        = "amd64"
   })
+
+  lifecycle {
+    ignore_changes = [network]
+  }
 }
 
 resource "hcloud_server" "worker_pool_cax" {
@@ -329,11 +333,15 @@ resource "hcloud_server" "worker_pool_cax" {
 
   user_data = templatefile("${path.module}/templates/k3s-worker-cloudinit.tftpl", {
     token       = "replace-with-secure-token"
-    server_ip   = local.control_plane_ips[0]
+    server_ip   = hcloud_server.control_plane[0].ipv4_address
     k3s_version = var.k3s_version
     nodepool    = "cax"
     arch        = "arm64"
   })
+
+  lifecycle {
+    ignore_changes = [network]
+  }
 }
 
 resource "hcloud_load_balancer_target" "workers_cpx" {
@@ -349,6 +357,14 @@ resource "hcloud_load_balancer_target" "workers_cax" {
   load_balancer_id = hcloud_load_balancer.ingress.id
   type             = "server"
   server_id        = hcloud_server.worker_pool_cax[count.index].id
+  use_private_ip   = true
+}
+
+resource "hcloud_load_balancer_target" "control_plane" {
+  count            = var.control_plane_count
+  load_balancer_id = hcloud_load_balancer.ingress.id
+  type             = "server"
+  server_id        = hcloud_server.control_plane[count.index].id
   use_private_ip   = true
 }
 
@@ -716,7 +732,7 @@ output "api_server_public_ip" {
 resource "cloudflare_record" "admin_api_a" {
   count   = var.deploy_separate_api_projects && var.cloudflare_zone_id != "" && var.admin_api_domain != "" ? 1 : 0
   zone_id = var.cloudflare_zone_id
-  name    = var.admin_api_domain
+  name    = trimsuffix(var.admin_api_domain, ".${var.cluster_domain}")
   type    = "A"
   value   = hcloud_server.admin_api[0].ipv4_address
   proxied = false
@@ -726,7 +742,7 @@ resource "cloudflare_record" "admin_api_a" {
 resource "cloudflare_record" "user_api_a" {
   count   = var.deploy_separate_api_projects && var.cloudflare_zone_id != "" && var.user_api_domain != "" ? 1 : 0
   zone_id = var.cloudflare_zone_id
-  name    = var.user_api_domain
+  name    = trimsuffix(var.user_api_domain, ".${var.cluster_domain}")
   type    = "A"
   value   = hcloud_server.admin_api[0].ipv4_address
   proxied = false

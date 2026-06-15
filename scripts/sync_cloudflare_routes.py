@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from urllib import request
+from urllib.parse import urlparse
 
 
 def env(name: str) -> str:
@@ -16,7 +17,7 @@ def env(name: str) -> str:
 api_token = env("CLOUDFLARE_API_TOKEN")
 zone_id = env("CLOUDFLARE_ZONE_ID")
 tunnel_id = env("CLOUDFLARE_TUNNEL_ID")
-account_id = env("CF_ACCOUNT_ID")
+account_id = os.environ.get("CF_ACCOUNT_ID", "")
 admin_domain = env("ADMIN_DOMAIN")
 user_domain = env("USER_DOMAIN")
 monitoring_domain = env("MONITORING_DOMAIN")
@@ -73,32 +74,54 @@ def upsert_cname(hostname: str) -> None:
         call("POST", f"/zones/{zone_id}/dns_records", payload)
 
 
-for hostname in (admin_domain, user_domain, monitoring_domain):
-    upsert_cname(hostname)
+def origin_host(origin: str) -> str:
+    parsed = urlparse(origin)
+    if not parsed.hostname:
+        raise RuntimeError(f"Invalid origin URL: {origin}")
+    return parsed.hostname
 
-config = call("GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations").get("result", {})
-ingress = ((config.get("config") or {}).get("ingress")) or []
-managed_hostnames = {admin_domain, user_domain, monitoring_domain}
-filtered = [
-    rule
-    for rule in ingress
-    if not (
-        isinstance(rule, dict)
-        and (rule.get("service") == "http_status:404" or rule.get("hostname") in managed_hostnames)
-    )
-]
-filtered.extend(
-    [
-        {"hostname": admin_domain, "service": admin_origin},
-        {"hostname": user_domain, "service": user_origin},
-        {"hostname": monitoring_domain, "service": monitoring_origin},
-        {"service": "http_status:404"},
+
+def upsert_proxied_a(hostname: str, ip_address: str) -> None:
+    for record in records_by_name(hostname):
+        if record["type"] in {"A", "AAAA", "CNAME"}:
+            call("DELETE", f"/zones/{zone_id}/dns_records/{record['id']}")
+
+    payload = {
+        "type": "A",
+        "name": hostname,
+        "content": ip_address,
+        "proxied": False,
+        "ttl": 1,
+    }
+    call("POST", f"/zones/{zone_id}/dns_records", payload)
+
+
+upsert_proxied_a(admin_domain, origin_host(admin_origin))
+upsert_proxied_a(user_domain, origin_host(user_origin))
+upsert_cname(monitoring_domain)
+
+if account_id:
+    config = call("GET", f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations").get("result", {})
+    ingress = ((config.get("config") or {}).get("ingress")) or []
+    managed_hostnames = {monitoring_domain}
+    filtered = [
+        rule
+        for rule in ingress
+        if not (
+            isinstance(rule, dict)
+            and (rule.get("service") == "http_status:404" or rule.get("hostname") in managed_hostnames)
+        )
     ]
-)
-call(
-    "PUT",
-    f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
-    {"config": {"ingress": filtered}},
-)
+    filtered.extend(
+        [
+            {"hostname": monitoring_domain, "service": monitoring_origin},
+            {"service": "http_status:404"},
+        ]
+    )
+    call(
+        "PUT",
+        f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations",
+        {"config": {"ingress": filtered}},
+    )
 
 print(f"Synced Cloudflare routes for {admin_domain}, {user_domain}, and {monitoring_domain}.")

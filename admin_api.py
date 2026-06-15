@@ -181,6 +181,11 @@ def admin_frontend() -> FileResponse:
 
 @app.get("/health")
 def health(_: None = Depends(require_admin_token)) -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/cluster/health")
+def cluster_health(_: None = Depends(require_admin_token)) -> Dict[str, str]:
     try:
         nodes = corev1.list_node().items
     except Exception as exc:

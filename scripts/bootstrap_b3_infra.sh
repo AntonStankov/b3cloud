@@ -9,6 +9,36 @@ SSH_USER="${SSH_USER:-root}"
 
 cd "$ROOT_DIR"
 
+tfvar_string() {
+  local key="$1"
+  awk -F'"' -v key="$key" '$0 ~ "^[[:space:]]*" key "[[:space:]]*=" { print $2; exit }' "$TFVARS"
+}
+
+check_hcloud_token() {
+  local label="$1"
+  local token="$2"
+  if [[ -z "$token" ]]; then
+    echo "Missing Hetzner token for ${label}." >&2
+    exit 1
+  fi
+
+  local code
+  code="$(curl -sS -o /tmp/b3-hcloud-token-check.json -w '%{http_code}' \
+    -H "Authorization: Bearer ${token}" \
+    https://api.hetzner.cloud/v1/locations || true)"
+
+  if [[ "$code" != "200" ]]; then
+    echo "Invalid or expired Hetzner token for ${label}; Hetzner API returned HTTP ${code}." >&2
+    echo "Create/restore the project in Hetzner Cloud, generate a new project API token, then update ${TFVARS}." >&2
+    exit 1
+  fi
+}
+
+clients_token="$(tfvar_string hcloud_token)"
+platform_token="$(tfvar_string hcloud_admin_project_token)"
+check_hcloud_token "b3-clients" "$clients_token"
+check_hcloud_token "b3" "${platform_token:-$clients_token}"
+
 terraform init
 
 # Terraform's Kubernetes and Helm providers need a kubeconfig. On a blank rebuild,

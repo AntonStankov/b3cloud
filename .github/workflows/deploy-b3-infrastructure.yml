@@ -113,5 +113,5 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS "https://$USER_DOMAIN/health"
-          curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" "https://$ADMIN_DOMAIN/health"
+          curl -fsS "http://$USER_DOMAIN/health"
+          curl -fsS -H "X-Admin-Token: $ADMIN_TOKEN" "http://$ADMIN_DOMAIN/health"
