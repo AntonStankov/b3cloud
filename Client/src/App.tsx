@@ -350,6 +350,7 @@ function DeploymentExperience() {
               status={state.deployment.status}
               currentStep={state.deployment.currentStep}
               events={deploymentEvents}
+              job={activeJob}
               onOpenDashboard={() => dispatch({ type: "SET_STEP", step: "dashboard" })}
             />
           )}
@@ -512,7 +513,7 @@ function BlueprintView(props: {
   );
 }
 
-function IgnitionView(props: { status: DeploymentStatus; currentStep: number; events: DeploymentEvent[]; onOpenDashboard: () => void }) {
+function IgnitionView(props: { status: DeploymentStatus; currentStep: number; events: DeploymentEvent[]; job: DeployJob | null; onOpenDashboard: () => void }) {
   const steps = ["Provisioning", "Building", "Routing", "Live"];
   return (
     <section className="grid grid-cols-[380px_minmax(0,1fr)] gap-4 max-xl:grid-cols-1">
@@ -524,7 +525,61 @@ function IgnitionView(props: { status: DeploymentStatus; currentStep: number; ev
         </div>
         <button type="button" onClick={props.onOpenDashboard} className="mt-8 w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-white/70">Open command center</button>
       </div>
-      <LogTerminal events={props.events} streaming={props.status !== "ready" && props.status !== "failed"} />
+      <div className="space-y-4">
+        <FailureDiagnostics job={props.job} />
+        <LogTerminal events={props.events} streaming={props.status !== "ready" && props.status !== "failed"} />
+      </div>
+    </section>
+  );
+}
+
+function FailureDiagnostics({ job }: { job: DeployJob | null }) {
+  if (!job || (job.status !== "failed" && !job.failure_summary && !job.runtime_failure)) {
+    return null;
+  }
+
+  const failure = job.runtime_failure;
+  const containers = failure?.pods.flatMap((pod) =>
+    pod.containers.map((container) => ({ pod: pod.name, ...container }))
+  ) ?? [];
+  const primaryContainer = containers.find((container) => container.error_line) || containers[0];
+  const logs = primaryContainer?.current_logs || primaryContainer?.previous_logs || "";
+
+  return (
+    <section className="rounded-[30px] border border-rose-300/15 bg-rose-400/[0.06] p-5 shadow-tactile backdrop-blur-md">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="font-mono text-xs uppercase tracking-[0.24em] text-rose-200/70">Deployment failure</p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-[-0.05em] text-white">{job.failure_summary || failure?.summary || job.error || "Deployment failed"}</h2>
+        </div>
+        <span className="rounded-full border border-rose-200/10 bg-rose-300/10 px-3 py-1 font-mono text-xs uppercase tracking-[0.16em] text-rose-100">failed</span>
+      </div>
+
+      {primaryContainer && (
+        <div className="mt-4 grid gap-3 rounded-2xl border border-white/5 bg-[#0B0B0F]/70 p-4 font-mono text-sm">
+          <div className="grid gap-2 md:grid-cols-3">
+            <span className="text-white/45">pod <strong className="text-white/80">{primaryContainer.pod}</strong></span>
+            <span className="text-white/45">container <strong className="text-white/80">{primaryContainer.name}</strong></span>
+            <span className="text-white/45">restarts <strong className="text-white/80">{primaryContainer.restarts}</strong></span>
+          </div>
+          {primaryContainer.state && <p className="text-amber-100/80">state: {primaryContainer.state}</p>}
+          {primaryContainer.error_line && <p className="text-rose-100">error: {primaryContainer.error_line}</p>}
+        </div>
+      )}
+
+      {logs && (
+        <pre className="mt-4 max-h-56 overflow-auto rounded-2xl border border-white/5 bg-[#08080C] p-4 font-mono text-xs leading-6 text-white/65">{logs}</pre>
+      )}
+
+      {!!failure?.events.length && (
+        <div className="mt-4 space-y-2">
+          {failure.events.slice(-5).map((event, index) => (
+            <div key={`${event.timestamp}-${index}`} className="rounded-2xl border border-white/5 bg-white/[0.03] px-4 py-3 text-sm text-white/60">
+              <span className="font-mono text-cyan-100/70">{event.reason}</span> {event.object}: {event.message}
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

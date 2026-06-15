@@ -31,6 +31,15 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 
+class DeploymentReadinessError(TimeoutError):
+    def __init__(self, namespace: str, deployment_name: str, diagnostics: Dict[str, object]):
+        self.namespace = namespace
+        self.deployment_name = deployment_name
+        self.diagnostics = diagnostics
+        summary = str(diagnostics.get("summary") or "Deployment did not become ready")
+        super().__init__(f"Timed out waiting for deployment {namespace}/{deployment_name} to become ready: {summary}")
+
+
 @dataclass
 class ResourceLimits:
     cpu_request: str
@@ -1048,6 +1057,8 @@ class PlatformCore:
         status_callback: Optional[Callable[[str], None]] = None,
     ) -> None:
         deadline = time.time() + timeout_seconds
+        last_diagnostics: Dict[str, object] = {}
+        next_diagnostic_at = 0.0
         while time.time() < deadline:
             dep = self.apps.read_namespaced_deployment(deployment_name, namespace)
             desired = dep.spec.replicas or 0
@@ -1056,8 +1067,156 @@ class PlatformCore:
             if desired > 0 and ready >= desired and available >= desired:
                 self._emit_status(status_callback, f"Replacement workload {deployment_name} is ready.")
                 return
+            now = time.time()
+            if now >= next_diagnostic_at:
+                last_diagnostics = self._collect_deployment_diagnostics(namespace, deployment_name)
+                summary = str(last_diagnostics.get("summary") or "waiting for pods to become ready")
+                self._emit_status(status_callback, f"Workload {deployment_name} is not ready yet: {summary}")
+                next_diagnostic_at = now + 15
             time.sleep(3)
-        raise TimeoutError(f"Timed out waiting for deployment {namespace}/{deployment_name} to become ready")
+        diagnostics = self._collect_deployment_diagnostics(namespace, deployment_name) or last_diagnostics
+        raise DeploymentReadinessError(namespace, deployment_name, diagnostics)
+
+    def _collect_deployment_diagnostics(self, namespace: str, deployment_name: str) -> Dict[str, object]:
+        diagnostics: Dict[str, object] = {
+            "namespace": namespace,
+            "deployment_name": deployment_name,
+            "summary": "",
+            "pods": [],
+            "events": [],
+        }
+        try:
+            dep = self.apps.read_namespaced_deployment(deployment_name, namespace)
+            labels = dep.spec.template.metadata.labels or {}
+            selector = ",".join(f"{key}={value}" for key, value in sorted(labels.items()))
+        except ApiException as exc:
+            diagnostics["summary"] = f"Deployment lookup failed: {exc.reason or exc.status}"
+            return diagnostics
+
+        summaries: list[str] = []
+        try:
+            pods = self.core.list_namespaced_pod(namespace, label_selector=selector).items if selector else []
+        except ApiException as exc:
+            diagnostics["summary"] = f"Pod lookup failed: {exc.reason or exc.status}"
+            pods = []
+
+        pod_payloads = []
+        for pod in pods:
+            pod_info: Dict[str, object] = {
+                "name": pod.metadata.name,
+                "phase": pod.status.phase,
+                "containers": [],
+            }
+            for container_status in pod.status.container_statuses or []:
+                state = self._container_status_text(container_status)
+                current_logs = self._read_container_logs(namespace, pod.metadata.name, container_status.name, previous=False)
+                previous_logs = self._read_container_logs(namespace, pod.metadata.name, container_status.name, previous=True)
+                error_line = self._first_failure_line(current_logs, previous_logs)
+                if error_line:
+                    summaries.append(f"{pod.metadata.name}/{container_status.name}: {error_line}")
+                elif state:
+                    summaries.append(f"{pod.metadata.name}/{container_status.name}: {state}")
+                pod_info["containers"].append(
+                    {
+                        "name": container_status.name,
+                        "ready": bool(container_status.ready),
+                        "restarts": int(container_status.restart_count or 0),
+                        "state": state,
+                        "current_logs": current_logs,
+                        "previous_logs": previous_logs,
+                        "error_line": error_line,
+                    }
+                )
+            pod_payloads.append(pod_info)
+        diagnostics["pods"] = pod_payloads
+
+        try:
+            events = self.core.list_namespaced_event(namespace).items
+            related = []
+            pod_names = {str(item.get("name")) for item in pod_payloads}
+            for event in events:
+                involved_name = event.involved_object.name
+                if involved_name != deployment_name and involved_name not in pod_names and deployment_name not in involved_name:
+                    continue
+                related.append(
+                    {
+                        "type": event.type,
+                        "reason": event.reason,
+                        "message": event.message,
+                        "object": f"{event.involved_object.kind}/{involved_name}",
+                        "timestamp": str(event.last_timestamp or event.event_time or event.metadata.creation_timestamp or ""),
+                    }
+                )
+            diagnostics["events"] = related[-30:]
+        except ApiException:
+            diagnostics["events"] = []
+
+        if summaries:
+            diagnostics["summary"] = summaries[0]
+        elif not pod_payloads:
+            diagnostics["summary"] = "No pods have been created for the deployment yet."
+        else:
+            diagnostics["summary"] = "Pods exist but are not reporting Ready."
+        return diagnostics
+
+    def _read_container_logs(self, namespace: str, pod_name: str, container_name: str, previous: bool) -> str:
+        try:
+            return self.core.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=namespace,
+                container=container_name,
+                tail_lines=80,
+                previous=previous,
+            )
+        except ApiException as exc:
+            if exc.status in {400, 404}:
+                return ""
+            return f"Failed to read pod logs: {exc.reason or exc.status}"
+        except Exception as exc:
+            return f"Failed to read pod logs: {exc}"
+
+    @staticmethod
+    def _container_status_text(container_status) -> str:
+        state = container_status.state
+        last_state = container_status.last_state
+        if state and state.waiting:
+            message = state.waiting.message or state.waiting.reason or "waiting"
+            return f"waiting: {message}"
+        if state and state.terminated:
+            message = state.terminated.message or state.terminated.reason or "terminated"
+            return f"terminated: {message} (exit {state.terminated.exit_code})"
+        if state and state.running:
+            return "running"
+        if last_state and last_state.terminated:
+            message = last_state.terminated.message or last_state.terminated.reason or "terminated"
+            return f"last terminated: {message} (exit {last_state.terminated.exit_code})"
+        return ""
+
+    @staticmethod
+    def _first_failure_line(*logs: str) -> str:
+        patterns = (
+            "error",
+            "exception",
+            "traceback",
+            "econnrefused",
+            "module not found",
+            "cannot find module",
+            "failed",
+            "fatal",
+            "emerg",
+            "panic",
+            "permission denied",
+            "no such file",
+        )
+        for log_text in logs:
+            for line in str(log_text or "").splitlines():
+                normalized = line.strip()
+                if not normalized:
+                    continue
+                lowered = normalized.lower()
+                if any(pattern in lowered for pattern in patterns):
+                    return normalized[:500]
+        return ""
 
     def _release_deployment_name(self, app_name: str) -> str:
         suffix = self._short_hash(f"{app_name}:{time.time_ns()}")

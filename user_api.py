@@ -28,7 +28,7 @@ from kubernetes import client
 from kubernetes.client.rest import ApiException
 from pydantic import BaseModel, Field
 
-from platform_core import AutoscalingConfig, DeploymentRequest, PlatformCore, ResourceLimits, ServiceRequirement, sanitize_name
+from platform_core import AutoscalingConfig, DeploymentReadinessError, DeploymentRequest, PlatformCore, ResourceLimits, ServiceRequirement, sanitize_name
 
 
 class ResourceLimitsIn(BaseModel):
@@ -279,11 +279,14 @@ class DeployJobStore:
             job["updated_at"] = _now()
             self._persist()
 
-    def set_error(self, job_id: str, error_message: str) -> None:
+    def set_error(self, job_id: str, error_message: str, diagnostics: Optional[Dict[str, object]] = None) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job["error"] = error_message
             job["status"] = "failed"
+            if diagnostics:
+                job["failure_summary"] = diagnostics.get("summary") or error_message
+                job["runtime_failure"] = diagnostics
             job["updated_at"] = _now()
             self._persist()
 
@@ -550,6 +553,14 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
                 "components": results,
             },
         )
+    except DeploymentReadinessError as exc:
+        diagnostics = exc.diagnostics
+        summary = str(diagnostics.get("summary") or exc)
+        svc.jobs.append_log(job_id, f"Deploy job failed: {summary}")
+        _append_failure_diagnostics(job_id, diagnostics)
+        trace = traceback.format_exc()
+        svc.jobs.append_log(job_id, trace.strip())
+        svc.jobs.set_error(job_id, str(exc), diagnostics=diagnostics)
     except Exception as exc:
         svc.jobs.append_log(job_id, f"Deploy job failed: {exc}")
         trace = traceback.format_exc()
@@ -650,6 +661,37 @@ def _deploy_component(
     )
     return result
 
+
+
+def _append_failure_diagnostics(job_id: str, diagnostics: Dict[str, object]) -> None:
+    summary = diagnostics.get("summary")
+    if summary:
+        svc.jobs.append_log(job_id, f"Failure summary: {summary}")
+    for pod in diagnostics.get("pods", []) if isinstance(diagnostics.get("pods"), list) else []:
+        if not isinstance(pod, dict):
+            continue
+        pod_name = str(pod.get("name") or "pod")
+        for container in pod.get("containers", []) if isinstance(pod.get("containers"), list) else []:
+            if not isinstance(container, dict):
+                continue
+            name = str(container.get("name") or "container")
+            state = str(container.get("state") or "")
+            restarts = container.get("restarts", 0)
+            if state:
+                svc.jobs.append_log(job_id, f"Container {pod_name}/{name}: {state}; restarts={restarts}")
+            error_line = str(container.get("error_line") or "")
+            if error_line:
+                svc.jobs.append_log(job_id, f"Container error: {error_line}")
+            logs = str(container.get("current_logs") or container.get("previous_logs") or "").strip()
+            if logs:
+                svc.jobs.append_log(job_id, f"Last logs from {pod_name}/{name}:\n{logs[-4000:]}")
+    for event in diagnostics.get("events", []) if isinstance(diagnostics.get("events"), list) else []:
+        if not isinstance(event, dict):
+            continue
+        reason = event.get("reason") or "Event"
+        message = event.get("message") or ""
+        obj = event.get("object") or ""
+        svc.jobs.append_log(job_id, f"Kubernetes event {reason} {obj}: {message}")
 
 def _autoscaling_config(payload: AutoscalingIn) -> AutoscalingConfig:
     return AutoscalingConfig(

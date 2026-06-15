@@ -103,6 +103,38 @@ export type DeployJobStatus =
   | "cancelled"
   | "submitting";
 
+export interface RuntimeFailureContainer {
+  name: string;
+  ready: boolean;
+  restarts: number;
+  state: string;
+  current_logs: string;
+  previous_logs: string;
+  error_line: string;
+}
+
+export interface RuntimeFailurePod {
+  name: string;
+  phase: string;
+  containers: RuntimeFailureContainer[];
+}
+
+export interface RuntimeFailureEvent {
+  type: string;
+  reason: string;
+  message: string;
+  object: string;
+  timestamp: string;
+}
+
+export interface RuntimeFailure {
+  namespace: string;
+  deployment_name: string;
+  summary: string;
+  pods: RuntimeFailurePod[];
+  events: RuntimeFailureEvent[];
+}
+
 export interface DeployJob {
   job_id: string;
   status: DeployJobStatus;
@@ -115,6 +147,8 @@ export interface DeployJob {
   logs: string[];
   result: Record<string, unknown> | null;
   error: string | null;
+  failure_summary?: string;
+  runtime_failure?: RuntimeFailure;
 }
 
 export interface AppSummary {
