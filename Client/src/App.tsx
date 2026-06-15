@@ -79,6 +79,7 @@ export default function App() {
   const [runtimeLogs, setRuntimeLogs] = useState<RuntimeLogBundle | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [view, setView] = useState<"deploy" | "activity" | "operations">("deploy");
 
   const activeJob = useMemo(
     () => jobs.find((job) => job.job_id === activeJobId) || jobs[0] || null,
@@ -335,122 +336,164 @@ export default function App() {
 
   return (
     <Shell status={status}>
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Workspace</p>
-          <h1>Launchpad</h1>
-        </div>
-        <div className="identity">
-          <span>{session.user.email}</span>
-          <button onClick={signOut}>Sign out</button>
-        </div>
-      </header>
-
-      {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>Dismiss</button></div>}
-
-      <main className="grid-layout">
-        <section className="panel hero-panel">
-          <div>
-            <p className="eyebrow">GitHub access</p>
-            <h2>{githubToken ? "Repository access is linked" : "Link GitHub to deploy private repos"}</h2>
-            <p>Supabase handles account identity. GitHub OAuth grants a short-lived provider token that is sent only when analyzing or building a repository.</p>
-          </div>
-          <button className="primary" onClick={connectGithub}>{githubToken ? "Reconnect GitHub" : "Connect GitHub"}</button>
-        </section>
-
-        <section className="panel deploy-panel">
-          <div className="section-head">
-            <div><p className="eyebrow">New deployment</p><h2>Source selection</h2></div>
-            <button onClick={runAnalyze} disabled={!repoUrl || busy === "analyze"}>{busy === "analyze" ? "Analyzing..." : "Analyze repo"}</button>
-          </div>
-          <div className="repo-strip">
-            {repos.slice(0, 8).map((repo) => (
-              <button key={repo.id} className={repo.html_url === repoUrl ? "repo-card active" : "repo-card"} onClick={() => { setRepoUrl(repo.html_url); setRevision(repo.default_branch || "main"); }}>
-                <strong>{repo.full_name}</strong>
-                <span>{repo.private ? "Private" : "Public"} · {repo.language || "Mixed"}</span>
-              </button>
-            ))}
-          </div>
-          <div className="form-row">
-            <label>GitHub URL<input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/acme/app" /></label>
-            <label>Revision<input value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="main" /></label>
-            <label>Node architecture<select value={nodeArch} onChange={(e) => setNodeArch(e.target.value)}><option value="amd64">Intel/AMD CPX</option><option value="arm64">ARM CAX</option></select></label>
-          </div>
-        </section>
-
-        {analysis && (
-          <section className="panel analysis-panel">
-            <div className="section-head">
-              <div><p className="eyebrow">Build plan</p><h2>{analysis.repo_name || "Detected application"}</h2></div>
-              <span className="pill">{analysis.domain}</span>
+      <div className="console-shell">
+        <aside className="console-nav">
+          <div className="nav-user">
+            <span className="avatar">{session.user.email?.slice(0, 1).toUpperCase() || "U"}</span>
+            <div>
+              <strong>{session.user.email}</strong>
+              <span>{githubToken ? "GitHub linked" : "GitHub not linked"}</span>
             </div>
-            <div className="component-grid">
-              {components.map((item, index) => (
-                <article className="component-card" key={`${item.component.path}-${index}`}>
-                  <div className="component-title"><strong>{item.component.name}</strong><span>{item.component.type}</span></div>
-                  <p>{item.component.path} · port {item.port}</p>
-                  <label className="switch"><input type="checkbox" checked={item.public} onChange={(e) => updateComponent(index, { public: e.target.checked })} /> Public route</label>
-                  <label>Port<input type="number" value={item.port} onChange={(e) => updateComponent(index, { port: Number(e.target.value) || 8080 })} /></label>
-                  <div className="chips">
-                    {item.component.services.map((service) => (
-                      <label key={service.type} className="chip"><input type="checkbox" checked={item.services.includes(service.type)} onChange={() => toggleService(index, service.type)} />{service.type}</label>
-                    ))}
-                    {!item.component.services.length && <span className="muted">No backing services detected</span>}
+          </div>
+          <button className={view === "deploy" ? "nav-item active" : "nav-item"} onClick={() => setView("deploy")}>
+            <span>01</span> Deploy
+          </button>
+          <button className={view === "activity" ? "nav-item active" : "nav-item"} onClick={() => setView("activity")}>
+            <span>02</span> Activity
+          </button>
+          <button className={view === "operations" ? "nav-item active" : "nav-item"} onClick={() => setView("operations")}>
+            <span>03</span> Operations
+          </button>
+          <div className="nav-footer">
+            <span>{status}</span>
+            <button onClick={signOut}>Sign out</button>
+          </div>
+        </aside>
+
+        <section className="console-main">
+          {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError("")}>Dismiss</button></div>}
+
+          {view === "deploy" && (
+            <div className="deploy-cockpit">
+              <section className="launch-hero">
+                <div>
+                  <p className="eyebrow">B3Cloud Launch Control</p>
+                  <h1>Ship a repo to Kubernetes in one guided flow.</h1>
+                  <p>Connect GitHub, pick a repository, let the platform detect components and services, then deploy behind automated Cloudflare routing.</p>
+                  <div className="hero-actions">
+                    <button className="primary" onClick={connectGithub}>{githubToken ? "Reconnect GitHub" : "Connect GitHub"}</button>
+                    <button onClick={() => setView("activity")}>View deploy activity</button>
                   </div>
-                  {Object.keys(item.env).map((key) => (
-                    <label key={key}>{key}<input value={item.env[key]} onChange={(e) => updateEnv(index, key, e.target.value)} placeholder="Required value" /></label>
-                  ))}
-                </article>
-              ))}
-            </div>
-            <div className="settings-grid">
-              <label>CPU request<input value={resources.cpu_request} onChange={(e) => setResources({ ...resources, cpu_request: e.target.value })} /></label>
-              <label>CPU limit<input value={resources.cpu_limit} onChange={(e) => setResources({ ...resources, cpu_limit: e.target.value })} /></label>
-              <label>Memory request<input value={resources.memory_request} onChange={(e) => setResources({ ...resources, memory_request: e.target.value })} /></label>
-              <label>Memory limit<input value={resources.memory_limit} onChange={(e) => setResources({ ...resources, memory_limit: e.target.value })} /></label>
-              <label>Min replicas<input type="number" value={autoscaling.min_replicas} onChange={(e) => setAutoscaling({ ...autoscaling, min_replicas: Number(e.target.value) || 1 })} /></label>
-              <label>Max replicas<input type="number" value={autoscaling.max_replicas} onChange={(e) => setAutoscaling({ ...autoscaling, max_replicas: Number(e.target.value) || 1 })} /></label>
-            </div>
-            <button className="primary deploy-button" onClick={submitDeploy} disabled={busy === "deploy"}>{busy === "deploy" ? "Submitting..." : "Deploy application"}</button>
-          </section>
-        )}
-
-        <section className="panel ops-panel">
-          <div className="section-head">
-            <div><p className="eyebrow">Operations</p><h2>Running apps</h2></div>
-            <button onClick={refreshDashboard}>Refresh</button>
-          </div>
-          <div className="app-list">
-            {apps.map((app) => (
-              <article className="app-row" key={`${app.namespace}/${app.app_name}`}>
-                <div><strong>{app.app_name}</strong><span>{app.namespace} · ready {app.ready_replicas}/{app.replicas}</span></div>
-                <div className="row-actions">
-                  <button onClick={() => inspectApp(app)}>Logs</button>
-                  <button onClick={() => deploymentAction(app, "start")}>Start</button>
-                  <button onClick={() => deploymentAction(app, "stop")}>Stop</button>
-                  <button className="danger" onClick={() => deploymentAction(app, "delete")}>Delete</button>
                 </div>
-              </article>
-            ))}
-            {!apps.length && <p className="muted">No deployments yet.</p>}
-          </div>
-        </section>
+                <div className="signal-card">
+                  <span className="signal-dot" />
+                  <strong>{githubToken ? "Repository access ready" : "GitHub access required"}</strong>
+                  <p>{githubToken ? "Private and public repositories can be analyzed for this session." : "Connect GitHub before deploying private repositories."}</p>
+                </div>
+              </section>
 
-        <section className="panel jobs-panel">
-          <div className="section-head"><div><p className="eyebrow">Build stream</p><h2>Deploy jobs</h2></div></div>
-          <div className="job-tabs">
-            {jobs.slice(0, 8).map((job) => <button key={job.job_id} className={activeJob?.job_id === job.job_id ? "active" : ""} onClick={() => setActiveJobId(job.job_id)}>{job.app_name || "job"}<span>{job.status}</span></button>)}
-          </div>
-          {activeJob ? <LogBox lines={activeJob.logs || []} error={activeJob.error || ""} /> : <p className="muted">No jobs recorded yet.</p>}
-        </section>
+              <section className="deploy-board">
+                <div className="deploy-card source-card">
+                  <div className="section-head">
+                    <div><p className="eyebrow">Step 1</p><h2>Select source</h2></div>
+                    <button onClick={runAnalyze} disabled={!repoUrl || busy === "analyze"}>{busy === "analyze" ? "Analyzing..." : "Analyze"}</button>
+                  </div>
+                  <div className="repo-rail">
+                    {repos.slice(0, 6).map((repo) => (
+                      <button key={repo.id} className={repo.html_url === repoUrl ? "repo-pill active" : "repo-pill"} onClick={() => { setRepoUrl(repo.html_url); setRevision(repo.default_branch || "main"); }}>
+                        <strong>{repo.full_name}</strong>
+                        <span>{repo.private ? "Private" : "Public"} / {repo.language || "Mixed"}</span>
+                      </button>
+                    ))}
+                    {!repos.length && <div className="empty-state">Connect GitHub to see recent repositories, or paste a URL below.</div>}
+                  </div>
+                  <div className="form-row split">
+                    <label>Repository URL<input value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} placeholder="https://github.com/acme/app" /></label>
+                    <label>Branch or SHA<input value={revision} onChange={(e) => setRevision(e.target.value)} placeholder="main" /></label>
+                    <label>Node class<select value={nodeArch} onChange={(e) => setNodeArch(e.target.value)}><option value="amd64">Intel/AMD CPX</option><option value="arm64">ARM CAX</option></select></label>
+                  </div>
+                </div>
 
-        {runtimeLogs && (
-          <section className="panel logs-panel">
-            <div className="section-head"><div><p className="eyebrow">Runtime logs</p><h2>{runtimeLogs.app_name}</h2></div><span className="pill">{runtimeLogs.status}</span></div>
-            <LogBox lines={runtimeLogs.pods.flatMap((pod) => pod.containers.flatMap((container) => [`${pod.name}/${container.name}`, container.current_logs || "No logs"] ))} error={runtimeLogs.error_summary || ""} />
-          </section>
-        )}
-      </main>
+                <aside className="deploy-aside">
+                  <div className="metric-card">
+                    <span>Last job</span>
+                    <strong>{jobs[0]?.status || "none"}</strong>
+                    <button onClick={() => setView("activity")}>Open activity</button>
+                  </div>
+                  <div className="metric-card">
+                    <span>Runtime controls</span>
+                    <strong>hidden by default</strong>
+                    <button onClick={() => setView("operations")}>Manage apps</button>
+                  </div>
+                </aside>
+              </section>
+
+              {analysis && (
+                <section className="deploy-card plan-card">
+                  <div className="section-head">
+                    <div><p className="eyebrow">Step 2</p><h2>{analysis.repo_name || "Review build plan"}</h2></div>
+                    <span className="pill">{analysis.domain}</span>
+                  </div>
+                  <div className="component-grid refined">
+                    {components.map((item, index) => (
+                      <article className="component-card" key={`${item.component.path}-${index}`}>
+                        <div className="component-title"><strong>{item.component.name}</strong><span>{item.component.type}</span></div>
+                        <p>{item.component.path} / port {item.port}</p>
+                        <label className="switch"><input type="checkbox" checked={item.public} onChange={(e) => updateComponent(index, { public: e.target.checked })} /> Public route</label>
+                        <label>Port<input type="number" value={item.port} onChange={(e) => updateComponent(index, { port: Number(e.target.value) || 8080 })} /></label>
+                        <div className="chips">
+                          {item.component.services.map((service) => (
+                            <label key={service.type} className="chip"><input type="checkbox" checked={item.services.includes(service.type)} onChange={() => toggleService(index, service.type)} />{service.type}</label>
+                          ))}
+                          {!item.component.services.length && <span className="muted">No backing services detected</span>}
+                        </div>
+                        {Object.keys(item.env).map((key) => (
+                          <label key={key}>{key}<input value={item.env[key]} onChange={(e) => updateEnv(index, key, e.target.value)} placeholder="Required value" /></label>
+                        ))}
+                      </article>
+                    ))}
+                  </div>
+                  <div className="settings-grid compact">
+                    <label>CPU request<input value={resources.cpu_request} onChange={(e) => setResources({ ...resources, cpu_request: e.target.value })} /></label>
+                    <label>CPU limit<input value={resources.cpu_limit} onChange={(e) => setResources({ ...resources, cpu_limit: e.target.value })} /></label>
+                    <label>Memory request<input value={resources.memory_request} onChange={(e) => setResources({ ...resources, memory_request: e.target.value })} /></label>
+                    <label>Memory limit<input value={resources.memory_limit} onChange={(e) => setResources({ ...resources, memory_limit: e.target.value })} /></label>
+                    <label>Min replicas<input type="number" value={autoscaling.min_replicas} onChange={(e) => setAutoscaling({ ...autoscaling, min_replicas: Number(e.target.value) || 1 })} /></label>
+                    <label>Max replicas<input type="number" value={autoscaling.max_replicas} onChange={(e) => setAutoscaling({ ...autoscaling, max_replicas: Number(e.target.value) || 1 })} /></label>
+                  </div>
+                  <button className="primary deploy-button" onClick={submitDeploy} disabled={busy === "deploy"}>{busy === "deploy" ? "Submitting deployment..." : "Deploy application"}</button>
+                </section>
+              )}
+            </div>
+          )}
+
+          {view === "activity" && (
+            <section className="workspace-panel">
+              <div className="section-head"><div><p className="eyebrow">Activity</p><h2>Deployment timeline</h2></div><button onClick={refreshDashboard}>Refresh</button></div>
+              <div className="job-list">
+                {jobs.slice(0, 10).map((job) => <button key={job.job_id} className={activeJob?.job_id === job.job_id ? "job-row active" : "job-row"} onClick={() => setActiveJobId(job.job_id)}><strong>{job.app_name || "deployment"}</strong><span>{job.status}</span><small>{job.updated_at || job.created_at}</small></button>)}
+              </div>
+              {activeJob ? <LogBox lines={activeJob.logs || []} error={activeJob.error || ""} /> : <div className="empty-state">No deployment jobs yet.</div>}
+            </section>
+          )}
+
+          {view === "operations" && (
+            <section className="workspace-panel">
+              <div className="section-head"><div><p className="eyebrow">Operations</p><h2>Manage deployed apps</h2></div><button onClick={refreshDashboard}>Refresh</button></div>
+              <div className="app-list operations-list">
+                {apps.map((app) => (
+                  <article className="app-row" key={`${app.namespace}/${app.app_name}`}>
+                    <div><strong>{app.app_name}</strong><span>{app.namespace} / ready {app.ready_replicas}/{app.replicas}</span></div>
+                    <div className="row-actions">
+                      <button onClick={() => inspectApp(app)}>Logs</button>
+                      <button onClick={() => deploymentAction(app, "start")}>Start</button>
+                      <button onClick={() => deploymentAction(app, "stop")}>Stop</button>
+                      <button className="danger" onClick={() => deploymentAction(app, "delete")}>Delete</button>
+                    </div>
+                  </article>
+                ))}
+                {!apps.length && <div className="empty-state">No deployed apps found.</div>}
+              </div>
+              {runtimeLogs && (
+                <section className="runtime-panel">
+                  <div className="section-head"><div><p className="eyebrow">Runtime logs</p><h2>{runtimeLogs.app_name}</h2></div><span className="pill">{runtimeLogs.status}</span></div>
+                  <LogBox lines={runtimeLogs.pods.flatMap((pod) => pod.containers.flatMap((container) => [`${pod.name}/${container.name}`, container.current_logs || "No logs"] ))} error={runtimeLogs.error_summary || ""} />
+                </section>
+              )}
+            </section>
+          )}
+        </section>
+      </div>
     </Shell>
   );
 
