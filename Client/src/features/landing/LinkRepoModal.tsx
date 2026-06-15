@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Modal from "../../components/Modal";
 import Icon from "../../components/Icon";
 import { validateApiKey } from "../../api/client";
-import { getApiKey, setApiKey } from "../../api/config";
+import { getApiKey, setApiKey, USE_MOCKS } from "../../api/config";
 import { isValidRepoUrl, listRepos, type GithubRepo } from "../../api/mocks/github";
 import { startTrialSession } from "../../api/mocks/auth";
 import styles from "./LinkRepoModal.module.css";
@@ -42,6 +42,11 @@ export default function LinkRepoModal({
     if (!open) return;
     setApiKeyValue(getApiKey());
     setError(null);
+    if (!USE_MOCKS) {
+      setRepos([]);
+      setLoadingRepos(false);
+      return;
+    }
     setLoadingRepos(true);
     listRepos()
       .then(setRepos)
@@ -122,34 +127,38 @@ export default function LinkRepoModal({
       </form>
       {error && <p className={styles.error}>{error}</p>}
 
-      <div className={styles.divider}>
-        <span>or pick a connected repo</span>
-      </div>
+      {USE_MOCKS && (
+        <>
+          <div className={styles.divider}>
+            <span>or pick a connected repo</span>
+          </div>
 
-      <div className={styles.repoList}>
-        {loadingRepos && <p className="muted">Loading repositories…</p>}
-        {!loadingRepos &&
-          repos.map((repo) => (
-            <button
-              key={repo.id}
-              className={styles.repoRow}
-              disabled={linking}
-              onClick={() => link(repo.html_url)}
-            >
-              <span className={styles.repoIcon}>
-                <Icon name="github" size={18} />
-              </span>
-              <span className={styles.repoMeta}>
-                <strong>
-                  {repo.full_name}
-                  {repo.private && <span className="badge">private</span>}
-                </strong>
-                <small className="muted">{repo.description}</small>
-              </span>
-              <span className={styles.repoLang}>{repo.language}</span>
-            </button>
-          ))}
-      </div>
+          <div className={styles.repoList}>
+            {loadingRepos && <p className="muted">Loading repositories…</p>}
+            {!loadingRepos &&
+              repos.map((repo) => (
+                <button
+                  key={repo.id}
+                  className={styles.repoRow}
+                  disabled={linking}
+                  onClick={() => link(repo.html_url)}
+                >
+                  <span className={styles.repoIcon}>
+                    <Icon name="github" size={18} />
+                  </span>
+                  <span className={styles.repoMeta}>
+                    <strong>
+                      {repo.full_name}
+                      {repo.private && <span className="badge">private</span>}
+                    </strong>
+                    <small className="muted">{repo.description}</small>
+                  </span>
+                  <span className={styles.repoLang}>{repo.language}</span>
+                </button>
+              ))}
+          </div>
+        </>
+      )}
     </Modal>
   );
 }
