@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import base64
 from copy import deepcopy
 from collections.abc import Callable
 from urllib import error, request
@@ -114,6 +115,7 @@ class PlatformCore:
     BUILD_SERVICE_ACCOUNT = "kpack-builder-sa"
     REGISTRY_SECRET_NAME = "registry-creds"
     GIT_SOURCE_SECRET_NAME = "github-basic-auth"
+    PLATFORM_SECRET_NAMESPACE = os.getenv("B3CLOUD_PLATFORM_SECRET_NAMESPACE", "platform-system")
     PACK_BUILDER_IMAGE = os.getenv("B3CLOUD_PACK_BUILDER_IMAGE", "paketobuildpacks/builder-jammy-base")
     PLATFORM_MANAGED_ENV_NAMES = {
         "PORT",
@@ -1357,8 +1359,19 @@ class PlatformCore:
         raise ValueError(f"Unsupported core plural for native apply: {plural}")
 
     def _ensure_build_namespace_prereqs(self, namespace: str) -> None:
-        self._sync_secret_from_namespace("kpack", self.REGISTRY_SECRET_NAME, namespace, required=True)
-        self._sync_secret_from_namespace("kpack", self.GIT_SOURCE_SECRET_NAME, namespace, required=False)
+        if not self._sync_secret_from_namespace(
+            self.PLATFORM_SECRET_NAMESPACE,
+            self.REGISTRY_SECRET_NAME,
+            namespace,
+            required=False,
+        ):
+            self._upsert_registry_secret_from_env(namespace)
+        self._sync_secret_from_namespace(
+            self.PLATFORM_SECRET_NAMESPACE,
+            self.GIT_SOURCE_SECRET_NAME,
+            namespace,
+            required=False,
+        )
         self._upsert_service_account(
             namespace,
             self.BUILD_SERVICE_ACCOUNT,
@@ -1372,12 +1385,12 @@ class PlatformCore:
         secret_name: str,
         target_namespace: str,
         required: bool,
-    ) -> None:
+    ) -> bool:
         try:
             source = self.core.read_namespaced_secret(secret_name, source_namespace)
         except ApiException as exc:
             if exc.status == 404 and not required:
-                return
+                return False
             raise
 
         body = client.V1Secret(
@@ -1393,6 +1406,42 @@ class PlatformCore:
         except ApiException as exc:
             if exc.status == 404:
                 self.core.create_namespaced_secret(target_namespace, body)
+            else:
+                raise
+        return True
+
+    def _upsert_registry_secret_from_env(self, namespace: str) -> None:
+        registry_server = os.getenv("B3CLOUD_REGISTRY_SERVER", "")
+        registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
+        registry_password = os.getenv("B3CLOUD_REGISTRY_PASSWORD", "")
+        if not registry_server or not registry_username or not registry_password:
+            raise RuntimeError(
+                "Registry pull secret is missing and B3CLOUD_REGISTRY_SERVER, "
+                "B3CLOUD_REGISTRY_USERNAME, or B3CLOUD_REGISTRY_PASSWORD is not set"
+            )
+
+        auth = base64.b64encode(f"{registry_username}:{registry_password}".encode("utf-8")).decode("ascii")
+        docker_config = {
+            "auths": {
+                registry_server: {
+                    "username": registry_username,
+                    "password": registry_password,
+                    "auth": auth,
+                }
+            }
+        }
+        body = client.V1Secret(
+            metadata=client.V1ObjectMeta(name=self.REGISTRY_SECRET_NAME, namespace=namespace),
+            type="kubernetes.io/dockerconfigjson",
+            string_data={".dockerconfigjson": json.dumps(docker_config)},
+        )
+
+        try:
+            self.core.read_namespaced_secret(self.REGISTRY_SECRET_NAME, namespace)
+            self.core.patch_namespaced_secret(self.REGISTRY_SECRET_NAME, namespace, body)
+        except ApiException as exc:
+            if exc.status == 404:
+                self.core.create_namespaced_secret(namespace, body)
             else:
                 raise
 
