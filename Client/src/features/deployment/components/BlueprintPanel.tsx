@@ -33,7 +33,7 @@ const externalEnvByDependency: Record<ManagedDependencyKind, string[]> = {
 export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
   if (!service) {
     return (
-      <aside className="rounded-[30px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-white/45">
+      <aside className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto rounded-[30px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-white/45 max-xl:static max-xl:max-h-none">
         Select a detected service to configure its build and runtime blueprint.
       </aside>
     );
@@ -46,7 +46,7 @@ export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
   );
 
   return (
-    <aside className="rounded-[30px] border border-white/5 bg-[#12121A]/90 p-5 shadow-tactile backdrop-blur-md">
+    <aside className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto rounded-[30px] border border-white/5 bg-[#12121A]/90 p-5 shadow-tactile backdrop-blur-md max-xl:static max-xl:max-h-none">
       <div className="mb-5 flex items-start justify-between gap-4">
         <div>
           <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Blueprint</p>

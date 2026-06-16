@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Background,
   Controls,
+  Handle,
+  Position,
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
@@ -160,6 +162,7 @@ function buildEdges(services: DetectedService[], communications: ServiceCommunic
       target: link.targetServiceId,
       animated: true,
       label: link.envNames.slice(0, 2).join(", "),
+      markerEnd: { type: "arrowclosed", color: "rgba(34,211,238,0.9)" },
       style: { stroke: "rgba(34,211,238,0.8)", strokeWidth: 2 },
       labelStyle: { fill: "rgba(207,250,254,0.9)", fontSize: 11 },
       labelBgStyle: { fill: "rgba(11,11,15,0.86)" },
@@ -175,6 +178,7 @@ function buildEdges(services: DetectedService[], communications: ServiceCommunic
         target: `dependency:${dependency.type}`,
         animated: false,
         label: dependency.type,
+        markerEnd: { type: "arrowclosed", color: "rgba(255,255,255,0.24)" },
         style: { stroke: "rgba(255,255,255,0.18)", strokeWidth: 1.6 },
         labelStyle: { fill: "rgba(255,255,255,0.45)", fontSize: 11 },
         labelBgStyle: { fill: "rgba(11,11,15,0.74)" },
@@ -189,7 +193,9 @@ function ServiceNode({ data }: NodeProps) {
   const { service, selected, onToggleDeploy } = data as ServiceNodeData;
   const tone = serviceTone[service.kind];
   return (
-    <div className={clsx("w-[236px] rounded-[22px] border p-4 shadow-tactile backdrop-blur-md", service.deploy ? "border-white/10 bg-[#12121A]/95" : "border-white/[0.04] bg-[#12121A]/55 opacity-60", selected && "border-cyan-300/45 shadow-glow")}>
+    <div className={clsx("relative w-[236px] rounded-[22px] border p-4 shadow-tactile backdrop-blur-md", service.deploy ? "border-white/10 bg-[#12121A]/95" : "border-white/[0.04] bg-[#12121A]/55 opacity-60", selected && "border-cyan-300/45 shadow-glow")}>
+      <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border !border-cyan-100/40 !bg-[#0B0B0F]" />
+      <Handle type="source" position={Position.Right} className="!h-3 !w-3 !border !border-cyan-100/40 !bg-cyan-300" />
       <div className="flex items-start justify-between gap-3">
         <div className={clsx("grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br text-sm font-black text-[#0B0B0F] ring-8", tone.gradient, tone.ring)}>
           {tone.icon}
@@ -215,7 +221,8 @@ function ServiceNode({ data }: NodeProps) {
 function DependencyNode({ data }: NodeProps) {
   const { type, label } = data as DependencyNodeData;
   return (
-    <div className="w-[190px] rounded-[22px] border border-white/5 bg-white/[0.035] p-4 shadow-tactile backdrop-blur-md">
+    <div className="relative w-[190px] rounded-[22px] border border-white/5 bg-white/[0.035] p-4 shadow-tactile backdrop-blur-md">
+      <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border !border-white/30 !bg-white/70" />
       <div className={clsx("grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br font-black text-[#0B0B0F]", dependencyTone[type])}>
         {label.slice(0, 2)}
       </div>

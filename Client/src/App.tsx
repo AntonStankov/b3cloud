@@ -517,7 +517,7 @@ function BlueprintView(props: {
 }) {
   const selectedCount = props.services.filter((service) => service.deploy).length;
   return (
-    <section className="grid grid-cols-[minmax(0,1fr)_420px] gap-4 max-xl:grid-cols-1">
+    <section className="grid grid-cols-[minmax(0,1fr)_420px] items-start gap-4 max-xl:grid-cols-1">
       <div className="rounded-[36px] border border-white/5 bg-white/[0.025] p-5 shadow-tactile backdrop-blur-md">
         <div className="mb-5 flex items-end justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200/60">Intelligence</p><h1 className="mt-3 text-5xl font-semibold tracking-[-0.07em]">Detected services.</h1><p className="mt-2 font-mono text-xs uppercase tracking-[0.16em] text-white/35">{selectedCount} of {props.services.length} selected for deployment</p></div><button type="button" onClick={props.onDeploy} disabled={props.busy === "deploy" || selectedCount === 0} className="rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-3 font-semibold text-[#0B0B0F] shadow-glow disabled:cursor-not-allowed disabled:opacity-40">{props.busy === "deploy" ? "Igniting..." : `Deploy ${selectedCount || ""}`}</button></div>
         <ArchitectureGraph services={props.services} communications={props.communications} selectedServiceId={props.selectedServiceId} onSelectService={props.onSelectService} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
