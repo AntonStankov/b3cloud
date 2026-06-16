@@ -66,6 +66,17 @@ export interface ServiceDependency {
   provision: boolean;
 }
 
+export interface ServiceCommunication {
+  id: string;
+  sourceServiceId: string;
+  targetServiceId: string;
+  sourceName: string;
+  targetName: string;
+  envNames: string[];
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+}
+
 export interface DetectedService {
   id: string;
   name: string;
@@ -82,6 +93,7 @@ export interface DetectedService {
   monthlyEstimateUsd: number;
   dependencies: ServiceDependency[];
   automaticEnv: AutoEnvVar[];
+  communicationEnv: AutoEnvVar[];
   warnings: string[];
 }
 

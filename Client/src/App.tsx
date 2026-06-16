@@ -4,11 +4,12 @@ import { motion } from "framer-motion";
 import { analyze, deploy, getJob, health, listJobs } from "./api/apps";
 import { clearBearerToken, setBearerToken } from "./api/config";
 import type { AnalyzeResult, AnalyzedComponent, DeployJob, ServiceType } from "./api/types";
+import { ArchitectureGraph } from "./features/deployment/components/ArchitectureGraph";
 import { BlueprintPanel } from "./features/deployment/components/BlueprintPanel";
 import { LogTerminal } from "./features/deployment/components/LogTerminal";
 import { ServiceDetectionGrid } from "./features/deployment/components/ServiceDetectionGrid";
 import { DeploymentFlowProvider, useDeploymentFlow } from "./features/deployment/state/DeploymentFlowContext";
-import type { AutoEnvVar, DetectedService, DeploymentEvent, DeploymentStatus, ManagedDependencyKind, RepositorySummary, ServiceKind } from "./features/deployment/types";
+import type { AutoEnvVar, DetectedService, DeploymentEvent, DeploymentStatus, ManagedDependencyKind, RepositorySummary, ServiceCommunication, ServiceKind } from "./features/deployment/types";
 import { supabase, supabaseConfigured } from "./supabase";
 
 interface GithubRepo {
@@ -55,8 +56,12 @@ function DeploymentExperience() {
   const [activeJob, setActiveJob] = useState<DeployJob | null>(null);
 
   const selectedService = useMemo(
-    () => state.services.find((service) => service.id === state.selectedServiceId) ?? null,
-    [state.selectedServiceId, state.services]
+    () => visibleServiceCommunicationEnv(
+      state.services.find((service) => service.id === state.selectedServiceId) ?? null,
+      state.services,
+      state.communications
+    ),
+    [state.selectedServiceId, state.services, state.communications]
   );
 
   const filteredRepositories = useMemo(() => {
@@ -178,7 +183,8 @@ function DeploymentExperience() {
     setError("");
     try {
       const result = await analyze({ github_url: repository.url, git_revision: repository.defaultBranch, github_token: githubToken || undefined });
-      dispatch({ type: "SET_SERVICES", services: analysisToServices(result) });
+      const architecture = analysisToArchitecture(result);
+      dispatch({ type: "SET_SERVICES", services: architecture.services, communications: architecture.communications });
     } catch (err) {
       setError(`Repository inspection failed: ${readError(err)}`);
       dispatch({ type: "SET_STEP", step: "source" });
@@ -343,6 +349,7 @@ function DeploymentExperience() {
             <BlueprintView
               busy={busy}
               services={state.services}
+              communications={state.communications}
               selectedServiceId={state.selectedServiceId}
               selectedService={selectedService}
               onSelectService={(serviceId) => dispatch({ type: "SELECT_SERVICE", serviceId })}
@@ -503,6 +510,7 @@ function BlueprintView(props: {
   services: DetectedService[];
   selectedServiceId: string | null;
   selectedService: DetectedService | null;
+  communications: ServiceCommunication[];
   onSelectService: (serviceId: string) => void;
   onUpdateService: (serviceId: string, patch: Partial<DetectedService>) => void;
   onDeploy: () => void;
@@ -512,6 +520,7 @@ function BlueprintView(props: {
     <section className="grid grid-cols-[minmax(0,1fr)_420px] gap-4 max-xl:grid-cols-1">
       <div className="rounded-[36px] border border-white/5 bg-white/[0.025] p-5 shadow-tactile backdrop-blur-md">
         <div className="mb-5 flex items-end justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200/60">Intelligence</p><h1 className="mt-3 text-5xl font-semibold tracking-[-0.07em]">Detected services.</h1><p className="mt-2 font-mono text-xs uppercase tracking-[0.16em] text-white/35">{selectedCount} of {props.services.length} selected for deployment</p></div><button type="button" onClick={props.onDeploy} disabled={props.busy === "deploy" || selectedCount === 0} className="rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-3 font-semibold text-[#0B0B0F] shadow-glow disabled:cursor-not-allowed disabled:opacity-40">{props.busy === "deploy" ? "Igniting..." : `Deploy ${selectedCount || ""}`}</button></div>
+        <ArchitectureGraph services={props.services} communications={props.communications} selectedServiceId={props.selectedServiceId} onSelectService={props.onSelectService} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
         <ServiceDetectionGrid services={props.services} selectedServiceId={props.selectedServiceId} onSelectService={props.onSelectService} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
       </div>
       <BlueprintPanel service={props.selectedService} onChange={props.onUpdateService} />
@@ -621,9 +630,39 @@ function toRepositorySummary(repo: GithubRepo): RepositorySummary {
   return { id: String(repo.id), fullName: repo.full_name, url: repo.html_url, defaultBranch: repo.default_branch || "main", private: repo.private, language: repo.language ?? undefined, updatedAt: repo.updated_at, isMonorepo: repo.size > 40000 || /mono|workspace|platform/i.test(repo.full_name) };
 }
 
-function analysisToServices(result: AnalyzeResult): DetectedService[] {
+function analysisToArchitecture(result: AnalyzeResult): { services: DetectedService[]; communications: ServiceCommunication[] } {
   const components = result.components.length ? result.components : [];
-  return components.map((component) => componentToService(component, result));
+  const services = components.map((component) => componentToService(component, result));
+  const byPath = new Map(components.map((component, index) => [component.path, services[index]]));
+  const communications: ServiceCommunication[] = [];
+
+  for (const link of result.communications ?? []) {
+    const source = byPath.get(link.source_path);
+    const target = byPath.get(link.target_path);
+    if (!source || !target) continue;
+    const communication: ServiceCommunication = {
+      id: `${source.id}->${target.id}`,
+      sourceServiceId: source.id,
+      targetServiceId: target.id,
+      sourceName: source.name,
+      targetName: target.name,
+      envNames: link.env_names,
+      confidence: link.confidence === "high" ? "high" : link.confidence === "low" ? "low" : "medium",
+      evidence: link.evidence,
+    };
+    communications.push(communication);
+    source.communicationEnv = mergeAutoEnv(
+      source.communicationEnv,
+      link.env_names.map((key) => ({
+        key,
+        source: `communication with ${target.name}`,
+        secret: false,
+        evidence: link.evidence,
+      }))
+    );
+  }
+
+  return { services, communications };
 }
 
 function componentToService(component: AnalyzedComponent, result: AnalyzeResult): DetectedService {
@@ -649,7 +688,31 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
       provision: service.provision,
     })),
     automaticEnv: autoEnvForComponent(component),
+    communicationEnv: [],
     warnings: component.warnings || [],
+  };
+}
+
+function mergeAutoEnv(current: AutoEnvVar[], next: AutoEnvVar[]): AutoEnvVar[] {
+  const byKey = new Map(current.map((item) => [item.key, item]));
+  for (const item of next) {
+    const existing = byKey.get(item.key);
+    byKey.set(item.key, existing ? { ...existing, evidence: [...(existing.evidence || []), ...(item.evidence || [])].slice(0, 6) } : item);
+  }
+  return [...byKey.values()];
+}
+
+function visibleServiceCommunicationEnv(service: DetectedService | null, services: DetectedService[], communications: ServiceCommunication[]): DetectedService | null {
+  if (!service) return null;
+  const selected = new Set(services.filter((item) => item.deploy).map((item) => item.id));
+  const visibleEnvNames = new Set(
+    communications
+      .filter((link) => link.sourceServiceId === service.id && selected.has(link.sourceServiceId) && selected.has(link.targetServiceId))
+      .flatMap((link) => link.envNames)
+  );
+  return {
+    ...service,
+    communicationEnv: service.communicationEnv.filter((item) => visibleEnvNames.has(item.key)),
   };
 }
 

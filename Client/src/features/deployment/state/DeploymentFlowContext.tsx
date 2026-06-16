@@ -5,6 +5,7 @@ import type {
   DeploymentProgress,
   FlowStep,
   RepositorySummary,
+  ServiceCommunication,
   WorkspaceDraft,
 } from "../types";
 
@@ -15,6 +16,7 @@ interface DeploymentFlowState {
   repositories: RepositorySummary[];
   selectedRepository: RepositorySummary | null;
   services: DetectedService[];
+  communications: ServiceCommunication[];
   selectedServiceId: string | null;
   deployment: DeploymentProgress;
 }
@@ -25,7 +27,7 @@ type DeploymentFlowAction =
   | { type: "UPDATE_WORKSPACE"; patch: Partial<WorkspaceDraft> }
   | { type: "SET_REPOSITORIES"; repositories: RepositorySummary[] }
   | { type: "SELECT_REPOSITORY"; repository: RepositorySummary }
-  | { type: "SET_SERVICES"; services: DetectedService[] }
+  | { type: "SET_SERVICES"; services: DetectedService[]; communications?: ServiceCommunication[] }
   | { type: "SELECT_SERVICE"; serviceId: string }
   | { type: "UPDATE_SERVICE"; serviceId: string; patch: Partial<DetectedService> }
   | { type: "APPEND_DEPLOYMENT_EVENT"; event: DeploymentEvent }
@@ -38,6 +40,7 @@ const initialState: DeploymentFlowState = {
   repositories: [],
   selectedRepository: null,
   services: [],
+  communications: [],
   selectedServiceId: null,
   deployment: { status: "queued", currentStep: 0, events: [] },
 };
@@ -58,6 +61,7 @@ function reducer(state: DeploymentFlowState, action: DeploymentFlowAction): Depl
       return {
         ...state,
         services: action.services,
+        communications: action.communications ?? [],
         selectedServiceId: action.services[0]?.id ?? null,
         step: "blueprint",
       };

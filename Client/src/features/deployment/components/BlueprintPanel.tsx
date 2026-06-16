@@ -109,6 +109,7 @@ export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
         </div>
         <DependencyModeControl service={service} onChange={onChange} />
         <AutomaticEnvPanel dependencies={provisionedDependencies} variables={automaticEnv} />
+        <CommunicationEnvPanel variables={service.communicationEnv} />
         <EnvVarInput values={service.env} onChange={(env) => onChange(service.id, { env })} />
       </div>
     </aside>
@@ -202,6 +203,30 @@ function AutomaticEnvPanel({ dependencies, variables }: { dependencies: ServiceD
           <span key={dependency.type} className="rounded-full border border-cyan-200/10 bg-cyan-200/10 px-3 py-1 text-xs text-cyan-100/70">
             {dependencyLabels[dependency.type]} managed
           </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CommunicationEnvPanel({ variables }: { variables: AutoEnvVar[] }) {
+  if (!variables.length) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-[24px] border border-violet-300/10 bg-violet-300/[0.035] p-4">
+      <div className="mb-3">
+        <p className="font-mono text-xs uppercase tracking-[0.22em] text-violet-100/70">Service communication</p>
+        <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-white">Injected component URLs</h3>
+        <p className="mt-1 text-sm leading-6 text-white/45">These variables let this service call another selected service in the same deployment. Internal URLs use Kubernetes DNS; frontend public aliases are generated when needed.</p>
+      </div>
+      <div className="space-y-2">
+        {dedupeAutoEnv(variables).map((item) => (
+          <div key={`${item.source}-${item.key}`} className="rounded-2xl border border-white/5 bg-[#0B0B0F]/45 px-3 py-2">
+            <span className="font-mono text-xs text-violet-100/85">{item.key}</span>
+            <p className="mt-1 text-xs text-white/35">{item.source}</p>
+          </div>
         ))}
       </div>
     </div>

@@ -98,6 +98,17 @@ class DeployableComponent:
 
 
 @dataclass
+class ComponentCommunication:
+    source_path: str
+    source_name: str
+    target_path: str
+    target_name: str
+    env_names: list[str]
+    confidence: str
+    evidence: list[str]
+
+
+@dataclass
 class DeploymentRequest:
     github_url: str
     env: Dict[str, str]
@@ -309,12 +320,14 @@ class PlatformCore:
             components = self._detect_deployable_components(repo_dir)
             app_dir = repo_dir / components[0].path if components else self._detect_app_path(repo_dir)
             requirements = self._detect_service_requirements(app_dir)
+            communications = self._detect_component_communications(components)
             return {
                 "github_url": github_url,
                 "git_revision": actual_revision,
                 "app_path": str(app_dir.relative_to(repo_dir)),
                 "services": [asdict(req) for req in requirements],
                 "components": [asdict(component) for component in components],
+                "communications": [asdict(link) for link in communications],
             }
 
 
@@ -2602,6 +2615,86 @@ class PlatformCore:
             confidence = "high" if len(unique_reasons) >= 2 else "medium"
             requirements.append(ServiceRequirement(type=service, confidence=confidence, evidence=unique_reasons))
         return requirements
+
+    @staticmethod
+    def _detect_component_communications(components: list[DeployableComponent]) -> list[ComponentCommunication]:
+        if len(components) < 2:
+            return []
+
+        links: Dict[tuple[str, str], ComponentCommunication] = {}
+
+        def component_key(component: DeployableComponent) -> str:
+            raw = component.name if component.name != "app" else Path(component.path).name
+            if component.type == "backend" and raw in {"app", ".", ""}:
+                raw = "api"
+            return re.sub(r"[^A-Z0-9]+", "_", raw.upper()).strip("_") or "APP"
+
+        def candidate_env_names(target: DeployableComponent, source: DeployableComponent) -> list[str]:
+            key = component_key(target)
+            names = [
+                f"{key}_URL",
+                f"{key}_INTERNAL_URL",
+                f"{key}_PUBLIC_URL",
+                f"VITE_{key}_URL",
+            ]
+            if target.type == "backend":
+                names.extend(["API_URL", "BACKEND_URL", "API_PUBLIC_URL", "BACKEND_PUBLIC_URL", "VITE_API_URL", "VITE_BACKEND_URL"])
+                if source.type == "frontend":
+                    names.extend(["CORS_ORIGIN", "APP_PUBLIC_URL"])
+            return list(dict.fromkeys(names))
+
+        def add_link(source: DeployableComponent, target: DeployableComponent, env_names: list[str], confidence: str, evidence: list[str]) -> None:
+            if source.path == target.path:
+                return
+            key = (source.path, target.path)
+            existing = links.get(key)
+            if existing:
+                existing.env_names = list(dict.fromkeys([*existing.env_names, *env_names]))
+                existing.evidence = list(dict.fromkeys([*existing.evidence, *evidence]))[:8]
+                if existing.confidence != "high" and confidence == "high":
+                    existing.confidence = "high"
+                return
+            links[key] = ComponentCommunication(
+                source_path=source.path,
+                source_name=source.name,
+                target_path=target.path,
+                target_name=target.name,
+                env_names=list(dict.fromkeys(env_names)),
+                confidence=confidence,
+                evidence=evidence[:8],
+            )
+
+        for source in components:
+            declared_env = {item.name: item for item in source.env}
+            for target in components:
+                if source.path == target.path:
+                    continue
+                env_names = candidate_env_names(target, source)
+                matches = [name for name in env_names if name in declared_env]
+                if matches:
+                    evidence = []
+                    for name in matches:
+                        evidence.extend(declared_env[name].evidence[:2] or [declared_env[name].source])
+                    add_link(source, target, matches, "high", evidence or [f"{source.name} declares {', '.join(matches)}"])
+
+        frontend_components = [component for component in components if component.type == "frontend"]
+        backend_components = [component for component in components if component.type == "backend"]
+        if frontend_components and backend_components:
+            primary_backend = backend_components[0]
+            for frontend in frontend_components:
+                if (frontend.path, primary_backend.path) not in links:
+                    env_names = ["VITE_API_URL", "VITE_BACKEND_URL", "API_URL", "BACKEND_URL"]
+                    add_link(
+                        frontend,
+                        primary_backend,
+                        env_names,
+                        "medium",
+                        [
+                            "Detected public frontend and backend in the same repository; b3cloud will inject frontend/backend URL aliases during multi-component deployment."
+                        ],
+                    )
+
+        return sorted(links.values(), key=lambda link: (link.source_path, link.target_path))
 
     @staticmethod
     def _emit_status(status_callback: Optional[Callable[[str], None]], message: str) -> None:

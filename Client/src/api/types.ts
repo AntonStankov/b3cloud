@@ -42,12 +42,23 @@ export interface AnalyzedComponent {
   warnings?: string[];
 }
 
+export interface ComponentCommunication {
+  source_path: string;
+  source_name: string;
+  target_path: string;
+  target_name: string;
+  env_names: string[];
+  confidence: "high" | "medium" | "low" | string;
+  evidence: string[];
+}
+
 export interface AnalyzeResult {
   github_url: string;
   git_revision: string;
   app_path: string;
   services: ServiceRequirement[];
   components: AnalyzedComponent[];
+  communications?: ComponentCommunication[];
   // defaults_from_github_url merges these in on the server:
   repo_name?: string;
   app_name?: string;
