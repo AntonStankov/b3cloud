@@ -7,9 +7,10 @@ interface ServiceDetectionGridProps {
   selectedServiceId: string | null;
   loading?: boolean;
   onSelectService: (serviceId: string) => void;
+  onToggleDeploy: (serviceId: string, deploy: boolean) => void;
 }
 
-export function ServiceDetectionGrid({ services, selectedServiceId, loading = false, onSelectService }: ServiceDetectionGridProps) {
+export function ServiceDetectionGrid({ services, selectedServiceId, loading = false, onSelectService, onToggleDeploy }: ServiceDetectionGridProps) {
   if (loading) {
     return (
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -41,6 +42,7 @@ export function ServiceDetectionGrid({ services, selectedServiceId, loading = fa
             service={service}
             selected={selectedServiceId === service.id}
             onSelect={onSelectService}
+            onToggleDeploy={onToggleDeploy}
           />
         ))}
       </AnimatePresence>

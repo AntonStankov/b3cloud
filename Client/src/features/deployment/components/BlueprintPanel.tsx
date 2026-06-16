@@ -56,6 +56,27 @@ export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
         <span className="rounded-full border border-white/5 bg-white/[0.04] px-3 py-1 font-mono text-xs text-white/55">{service.kind}</span>
       </div>
       <div className="space-y-4">
+        <div className="rounded-[24px] border border-white/5 bg-white/[0.025] p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Deployment selection</p>
+              <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-white">{service.deploy ? "Included in next deploy" : "Skipped for next deploy"}</h3>
+              <p className="mt-1 text-sm leading-6 text-white/45">Use this when a monorepo contains services you do not want to launch right now.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onChange(service.id, { deploy: !service.deploy })}
+              className={clsx(
+                "rounded-2xl border px-4 py-3 font-mono text-xs uppercase tracking-[0.16em] transition-all duration-200",
+                service.deploy
+                  ? "border-rose-300/10 bg-rose-300/5 text-rose-100/75 hover:bg-rose-300/10"
+                  : "border-cyan-300/20 bg-cyan-300/10 text-cyan-100 hover:bg-cyan-300/15"
+              )}
+            >
+              {service.deploy ? "Skip service" : "Deploy service"}
+            </button>
+          </div>
+        </div>
         <label className="block">
           <span className="mb-2 block text-sm font-medium text-white/60">Build command</span>
           <input value={service.buildCommand ?? ""} onChange={(event) => onChange(service.id, { buildCommand: event.target.value })} placeholder="npm run build" className="w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 font-mono text-sm text-white outline-none" />

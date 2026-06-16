@@ -69,6 +69,7 @@ export interface ServiceDependency {
 export interface DetectedService {
   id: string;
   name: string;
+  deploy: boolean;
   kind: ServiceKind;
   path: string;
   port?: number;
