@@ -54,6 +54,7 @@ function DeploymentExperience() {
   const [error, setError] = useState("");
   const [apiStatus, setApiStatus] = useState("checking api");
   const [activeJob, setActiveJob] = useState<DeployJob | null>(null);
+  const [selectedDependency, setSelectedDependency] = useState<ManagedDependencyKind | null>(null);
 
   const selectedService = useMemo(
     () => visibleServiceCommunicationEnv(
@@ -184,6 +185,7 @@ function DeploymentExperience() {
     try {
       const result = await analyze({ github_url: repository.url, git_revision: repository.defaultBranch, github_token: githubToken || undefined });
       const architecture = analysisToArchitecture(result);
+      setSelectedDependency(null);
       dispatch({ type: "SET_SERVICES", services: architecture.services, communications: architecture.communications });
     } catch (err) {
       setError(`Repository inspection failed: ${readError(err)}`);
@@ -351,8 +353,15 @@ function DeploymentExperience() {
               services={state.services}
               communications={state.communications}
               selectedServiceId={state.selectedServiceId}
+              selectedDependency={selectedDependency}
               selectedService={selectedService}
-              onSelectService={(serviceId) => dispatch({ type: "SELECT_SERVICE", serviceId })}
+              onSelectService={(serviceId) => {
+                setSelectedDependency(null);
+                dispatch({ type: "SELECT_SERVICE", serviceId });
+              }}
+              onSelectDependency={(dependency) => {
+                setSelectedDependency(dependency);
+              }}
               onUpdateService={(serviceId, patch) => dispatch({ type: "UPDATE_SERVICE", serviceId, patch })}
               onDeploy={launchDeployment}
             />
@@ -510,8 +519,10 @@ function BlueprintView(props: {
   services: DetectedService[];
   selectedServiceId: string | null;
   selectedService: DetectedService | null;
+  selectedDependency: ManagedDependencyKind | null;
   communications: ServiceCommunication[];
   onSelectService: (serviceId: string) => void;
+  onSelectDependency: (dependency: ManagedDependencyKind) => void;
   onUpdateService: (serviceId: string, patch: Partial<DetectedService>) => void;
   onDeploy: () => void;
 }) {
@@ -520,10 +531,10 @@ function BlueprintView(props: {
     <section className="grid grid-cols-[minmax(0,1fr)_420px] items-start gap-4 max-xl:grid-cols-1">
       <div className="rounded-[36px] border border-white/5 bg-white/[0.025] p-5 shadow-tactile backdrop-blur-md">
         <div className="mb-5 flex items-end justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200/60">Intelligence</p><h1 className="mt-3 text-5xl font-semibold tracking-[-0.07em]">Detected services.</h1><p className="mt-2 font-mono text-xs uppercase tracking-[0.16em] text-white/35">{selectedCount} of {props.services.length} selected for deployment</p></div><button type="button" onClick={props.onDeploy} disabled={props.busy === "deploy" || selectedCount === 0} className="rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-3 font-semibold text-[#0B0B0F] shadow-glow disabled:cursor-not-allowed disabled:opacity-40">{props.busy === "deploy" ? "Igniting..." : `Deploy ${selectedCount || ""}`}</button></div>
-        <ArchitectureGraph services={props.services} communications={props.communications} selectedServiceId={props.selectedServiceId} onSelectService={props.onSelectService} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
+        <ArchitectureGraph services={props.services} communications={props.communications} selectedServiceId={props.selectedServiceId} selectedDependency={props.selectedDependency} onSelectService={props.onSelectService} onSelectDependency={props.onSelectDependency} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
         <ServiceDetectionGrid services={props.services} selectedServiceId={props.selectedServiceId} onSelectService={props.onSelectService} onToggleDeploy={(serviceId, deploy) => props.onUpdateService(serviceId, { deploy })} />
       </div>
-      <BlueprintPanel service={props.selectedService} onChange={props.onUpdateService} />
+      <BlueprintPanel service={props.selectedService} selectedDependency={props.selectedDependency} services={props.services} onChange={props.onUpdateService} />
     </section>
   );
 }
@@ -634,26 +645,29 @@ function analysisToArchitecture(result: AnalyzeResult): { services: DetectedServ
   const components = result.components.length ? result.components : [];
   const services = components.map((component) => componentToService(component, result));
   const byPath = new Map(components.map((component, index) => [component.path, services[index]]));
+  const envByPath = new Map(components.map((component) => [component.path, new Set(component.env.map((item) => item.name))]));
   const communications: ServiceCommunication[] = [];
 
   for (const link of result.communications ?? []) {
     const source = byPath.get(link.source_path);
     const target = byPath.get(link.target_path);
     if (!source || !target) continue;
+    const detectedSourceEnv = envByPath.get(link.source_path) ?? new Set<string>();
+    const displayedEnvNames = link.env_names.filter((name) => detectedSourceEnv.has(name));
     const communication: ServiceCommunication = {
       id: `${source.id}->${target.id}`,
       sourceServiceId: source.id,
       targetServiceId: target.id,
       sourceName: source.name,
       targetName: target.name,
-      envNames: link.env_names,
+      envNames: displayedEnvNames,
       confidence: link.confidence === "high" ? "high" : link.confidence === "low" ? "low" : "medium",
       evidence: link.evidence,
     };
     communications.push(communication);
     source.communicationEnv = mergeAutoEnv(
       source.communicationEnv,
-      link.env_names.map((key) => ({
+      displayedEnvNames.map((key) => ({
         key,
         source: `communication with ${target.name}`,
         secret: false,
@@ -732,21 +746,13 @@ function autoEnvForComponent(component: AnalyzedComponent): AutoEnvVar[] {
   const env: AutoEnvVar[] = [
     { key: "PORT", source: "platform runtime", secret: false, evidence: ["Injected by b3cloud to match the Kubernetes Service target port."] },
   ];
-  for (const dependency of component.services.filter(isManagedDependency)) {
-    for (const key of autoEnvByDependency[dependency.type]) {
-      env.push({
-        key,
-        source: `${dependency.type} managed service`,
-        secret: !key.endsWith("_HOST") && key !== "DB_PORT",
-        evidence: dependency.evidence,
-      });
-    }
-  }
+  const managedDependencies = component.services.filter(isManagedDependency).map((dependency) => dependency.type);
   for (const item of component.env.filter((item) => item.platform_managed)) {
-    if (!env.some((existing) => existing.key === item.name)) {
+    const owningDependency = managedDependencies.find((dependency) => autoEnvByDependency[dependency].includes(item.name));
+    if (owningDependency && !env.some((existing) => existing.key === item.name)) {
       env.push({
         key: item.name,
-        source: item.source || "detected platform-managed env",
+        source: `${owningDependency} managed service`,
         secret: item.secret,
         evidence: item.evidence,
       });

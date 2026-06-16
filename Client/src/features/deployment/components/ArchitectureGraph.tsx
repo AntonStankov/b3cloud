@@ -21,7 +21,9 @@ interface ArchitectureGraphProps {
   services: DetectedService[];
   communications: ServiceCommunication[];
   selectedServiceId: string | null;
+  selectedDependency: ManagedDependencyKind | null;
   onSelectService: (serviceId: string) => void;
+  onSelectDependency: (dependency: ManagedDependencyKind) => void;
   onToggleDeploy: (serviceId: string, deploy: boolean) => void;
 }
 
@@ -34,6 +36,8 @@ interface ServiceNodeData extends Record<string, unknown> {
 interface DependencyNodeData extends Record<string, unknown> {
   type: ManagedDependencyKind;
   label: string;
+  selected: boolean;
+  mode: "managed" | "external" | "mixed";
 }
 
 const dependencyLabels: Record<ManagedDependencyKind, string> = {
@@ -65,8 +69,8 @@ export function ArchitectureGraph(props: ArchitectureGraphProps) {
   );
 }
 
-function ArchitectureGraphInner({ services, communications, selectedServiceId, onSelectService, onToggleDeploy }: ArchitectureGraphProps) {
-  const baseNodes = useMemo(() => buildNodes(services, selectedServiceId, onToggleDeploy), [services, selectedServiceId, onToggleDeploy]);
+function ArchitectureGraphInner({ services, communications, selectedServiceId, selectedDependency, onSelectService, onSelectDependency, onToggleDeploy }: ArchitectureGraphProps) {
+  const baseNodes = useMemo(() => buildNodes(services, selectedServiceId, selectedDependency, onToggleDeploy), [services, selectedServiceId, selectedDependency, onToggleDeploy]);
   const [nodes, setNodes] = useState<Node[]>(baseNodes);
 
   useEffect(() => {
@@ -108,6 +112,9 @@ function ArchitectureGraphInner({ services, communications, selectedServiceId, o
           onNodesChange={onNodesChange}
           onNodeClick={(_, node) => {
             if (node.type === "service") onSelectService(node.id);
+            if (node.type === "dependency" && typeof node.data.type === "string") {
+              onSelectDependency(node.data.type as ManagedDependencyKind);
+            }
           }}
           fitView
           fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
@@ -123,7 +130,7 @@ function ArchitectureGraphInner({ services, communications, selectedServiceId, o
   );
 }
 
-function buildNodes(services: DetectedService[], selectedServiceId: string | null, onToggleDeploy: ArchitectureGraphProps["onToggleDeploy"]): Node[] {
+function buildNodes(services: DetectedService[], selectedServiceId: string | null, selectedDependency: ManagedDependencyKind | null, onToggleDeploy: ArchitectureGraphProps["onToggleDeploy"]): Node[] {
   const serviceNodes = services.map((service, index) => ({
     id: service.id,
     type: "service",
@@ -134,19 +141,27 @@ function buildNodes(services: DetectedService[], selectedServiceId: string | nul
     data: { service, selected: selectedServiceId === service.id, onToggleDeploy } satisfies ServiceNodeData,
   }));
 
-  const dependencyTypes = new Set<ManagedDependencyKind>();
+  const dependencyModes = new Map<ManagedDependencyKind, { managed: number; external: number }>();
   for (const service of services) {
     if (!service.deploy) continue;
     for (const dependency of service.dependencies) {
-      if (dependency.provision) dependencyTypes.add(dependency.type);
+      const current = dependencyModes.get(dependency.type) ?? { managed: 0, external: 0 };
+      if (dependency.provision) current.managed += 1;
+      else current.external += 1;
+      dependencyModes.set(dependency.type, current);
     }
   }
 
-  const dependencyNodes = [...dependencyTypes].map((type, index) => ({
+  const dependencyNodes = [...dependencyModes.entries()].map(([type, counts], index) => ({
     id: `dependency:${type}`,
     type: "dependency",
     position: { x: 760, y: 90 + index * 126 },
-    data: { type, label: dependencyLabels[type] } satisfies DependencyNodeData,
+    data: {
+      type,
+      label: dependencyLabels[type],
+      selected: selectedDependency === type,
+      mode: counts.managed > 0 && counts.external > 0 ? "mixed" : counts.managed > 0 ? "managed" : "external",
+    } satisfies DependencyNodeData,
   }));
 
   return [...serviceNodes, ...dependencyNodes];
@@ -160,10 +175,11 @@ function buildEdges(services: DetectedService[], communications: ServiceCommunic
       id: link.id,
       source: link.sourceServiceId,
       target: link.targetServiceId,
+      type: "smoothstep",
       animated: true,
-      label: link.envNames.slice(0, 2).join(", "),
+      label: link.envNames.length ? link.envNames.slice(0, 2).join(", ") : `${link.sourceName} -> ${link.targetName}`,
       markerEnd: { type: "arrowclosed", color: "rgba(34,211,238,0.9)" },
-      style: { stroke: "rgba(34,211,238,0.8)", strokeWidth: 2 },
+      style: { stroke: "rgba(34,211,238,0.95)", strokeWidth: 2.5 },
       labelStyle: { fill: "rgba(207,250,254,0.9)", fontSize: 11 },
       labelBgStyle: { fill: "rgba(11,11,15,0.86)" },
     }));
@@ -171,16 +187,16 @@ function buildEdges(services: DetectedService[], communications: ServiceCommunic
   for (const service of services) {
     if (!service.deploy) continue;
     for (const dependency of service.dependencies) {
-      if (!dependency.provision) continue;
       edges.push({
         id: `${service.id}->dependency:${dependency.type}`,
         source: service.id,
         target: `dependency:${dependency.type}`,
+        type: "smoothstep",
         animated: false,
-        label: dependency.type,
-        markerEnd: { type: "arrowclosed", color: "rgba(255,255,255,0.24)" },
-        style: { stroke: "rgba(255,255,255,0.18)", strokeWidth: 1.6 },
-        labelStyle: { fill: "rgba(255,255,255,0.45)", fontSize: 11 },
+        label: dependency.provision ? dependency.type : `${dependency.type} external`,
+        markerEnd: { type: "arrowclosed", color: dependency.provision ? "rgba(255,255,255,0.24)" : "rgba(252,211,77,0.55)" },
+        style: { stroke: dependency.provision ? "rgba(255,255,255,0.18)" : "rgba(252,211,77,0.55)", strokeWidth: dependency.provision ? 1.6 : 1.9, strokeDasharray: dependency.provision ? undefined : "6 5" },
+        labelStyle: { fill: dependency.provision ? "rgba(255,255,255,0.45)" : "rgba(254,243,199,0.8)", fontSize: 11 },
         labelBgStyle: { fill: "rgba(11,11,15,0.74)" },
       });
     }
@@ -219,15 +235,17 @@ function ServiceNode({ data }: NodeProps) {
 }
 
 function DependencyNode({ data }: NodeProps) {
-  const { type, label } = data as DependencyNodeData;
+  const { type, label, selected, mode } = data as DependencyNodeData;
   return (
-    <div className="relative w-[190px] rounded-[22px] border border-white/5 bg-white/[0.035] p-4 shadow-tactile backdrop-blur-md">
+    <div className={clsx("relative w-[190px] rounded-[22px] border bg-white/[0.035] p-4 shadow-tactile backdrop-blur-md", selected ? "border-cyan-300/45 shadow-glow" : "border-white/5")}>
       <Handle type="target" position={Position.Left} className="!h-3 !w-3 !border !border-white/30 !bg-white/70" />
       <div className={clsx("grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br font-black text-[#0B0B0F]", dependencyTone[type])}>
         {label.slice(0, 2)}
       </div>
       <strong className="mt-3 block text-sm text-white">{label}</strong>
-      <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.16em] text-white/35">managed service</p>
+      <p className={clsx("mt-1 font-mono text-[11px] uppercase tracking-[0.16em]", mode === "managed" ? "text-cyan-100/55" : mode === "external" ? "text-amber-100/70" : "text-violet-100/70")}>
+        {mode}
+      </p>
     </div>
   );
 }

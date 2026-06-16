@@ -4,6 +4,8 @@ import { EnvVarInput } from "./EnvVarInput";
 
 interface BlueprintPanelProps {
   service: DetectedService | null;
+  selectedDependency?: ManagedDependencyKind | null;
+  services?: DetectedService[];
   onChange: (serviceId: string, patch: Partial<DetectedService>) => void;
 }
 
@@ -30,7 +32,17 @@ const externalEnvByDependency: Record<ManagedDependencyKind, string[]> = {
   rabbitmq: ["RABBITMQ_URL"],
 };
 
-export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
+export function BlueprintPanel({ service, selectedDependency = null, services = [], onChange }: BlueprintPanelProps) {
+  if (selectedDependency) {
+    return (
+      <DependencyBlueprintPanel
+        dependency={selectedDependency}
+        services={services}
+        onChange={onChange}
+      />
+    );
+  }
+
   if (!service) {
     return (
       <aside className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto rounded-[30px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-white/45 max-xl:static max-xl:max-h-none">
@@ -107,7 +119,7 @@ export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
             ))}
           </div>
         </div>
-        <DependencyModeControl service={service} onChange={onChange} />
+        <DependencySummary service={service} />
         <AutomaticEnvPanel dependencies={provisionedDependencies} variables={automaticEnv} />
         <CommunicationEnvPanel variables={service.communicationEnv} />
         <EnvVarInput values={service.env} onChange={(env) => onChange(service.id, { env })} />
@@ -116,7 +128,7 @@ export function BlueprintPanel({ service, onChange }: BlueprintPanelProps) {
   );
 }
 
-function DependencyModeControl({ service, onChange }: BlueprintPanelProps & { service: DetectedService }) {
+function DependencySummary({ service }: { service: DetectedService }) {
   if (!service.dependencies.length) {
     return (
       <div className="rounded-[24px] border border-white/5 bg-white/[0.025] p-4">
@@ -126,13 +138,32 @@ function DependencyModeControl({ service, onChange }: BlueprintPanelProps & { se
     );
   }
 
-  function setProvisioning(dependency: ServiceDependency, provision: boolean) {
+  return (
+    <div className="rounded-[24px] border border-white/5 bg-white/[0.025] p-4">
+      <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Backing services</p>
+      <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-white">Configured from graph service nodes</h3>
+      <p className="mt-1 text-sm leading-6 text-white/45">Select a database, cache, or broker node in the architecture graph to choose managed or external mode.</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {service.dependencies.map((dependency) => (
+          <span key={dependency.type} className="rounded-full border border-white/5 bg-[#0B0B0F]/45 px-3 py-1 font-mono text-xs text-white/55">
+            {dependencyLabels[dependency.type]} / {dependency.provision ? "managed" : "external"}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DependencyBlueprintPanel({ dependency, services, onChange }: { dependency: ManagedDependencyKind; services: DetectedService[]; onChange: BlueprintPanelProps["onChange"] }) {
+  const consumers = services.filter((service) => service.deploy && service.dependencies.some((item) => item.type === dependency));
+
+  function setProvisioning(service: DetectedService, dependency: ServiceDependency, provision: boolean) {
     const dependencies = service.dependencies.map((item) =>
       item.type === dependency.type ? { ...item, provision } : item
     );
     const env = provision
       ? removeExternalEnv(service.env, dependency.type)
-      : addExternalEnv(service.env, dependency.type);
+      : addExternalEnv(service, dependency.type);
     onChange(service.id, {
       dependencies,
       env,
@@ -140,42 +171,46 @@ function DependencyModeControl({ service, onChange }: BlueprintPanelProps & { se
   }
 
   return (
-    <div className="rounded-[24px] border border-white/5 bg-white/[0.025] p-4">
-      <div className="mb-3">
-        <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Backing services</p>
-        <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-white">Connection mode</h3>
-        <p className="mt-1 text-sm leading-6 text-white/45">Choose whether b3cloud provisions the service and injects connection variables, or you provide external credentials yourself.</p>
+    <aside className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto rounded-[30px] border border-white/5 bg-[#12121A]/90 p-5 shadow-tactile backdrop-blur-md max-xl:static max-xl:max-h-none">
+      <div className="mb-5">
+        <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Managed service</p>
+        <h2 className="mt-2 text-2xl font-semibold tracking-[-0.05em] text-white">{dependencyLabels[dependency]}</h2>
+        <p className="mt-1 text-sm leading-6 text-white/45">Choose per app whether b3cloud provisions this service or the app uses external credentials.</p>
       </div>
       <div className="space-y-2">
-        {service.dependencies.map((dependency) => (
-          <div key={dependency.type} className="rounded-2xl border border-white/5 bg-[#0B0B0F]/45 p-3">
+        {consumers.map((service) => {
+          const requirement = service.dependencies.find((item) => item.type === dependency);
+          if (!requirement) return null;
+          return (
+          <div key={service.id} className="rounded-2xl border border-white/5 bg-[#0B0B0F]/45 p-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
-                <strong className="block text-sm text-white">{dependencyLabels[dependency.type]}</strong>
-                <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-white/35">{dependency.confidence} confidence</span>
+                <strong className="block text-sm text-white">{service.name}</strong>
+                <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-white/35">{requirement.confidence} confidence / {service.path}</span>
               </div>
               <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-white/5 bg-white/[0.035] p-1">
                 <button
                   type="button"
-                  onClick={() => setProvisioning(dependency, true)}
-                  className={clsx("rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200", dependency.provision ? "bg-cyan-300/15 text-cyan-100" : "text-white/45 hover:text-white")}
+                  onClick={() => setProvisioning(service, requirement, true)}
+                  className={clsx("rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200", requirement.provision ? "bg-cyan-300/15 text-cyan-100" : "text-white/45 hover:text-white")}
                 >
                   Managed
                 </button>
                 <button
                   type="button"
-                  onClick={() => setProvisioning(dependency, false)}
-                  className={clsx("rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200", !dependency.provision ? "bg-amber-300/15 text-amber-100" : "text-white/45 hover:text-white")}
+                  onClick={() => setProvisioning(service, requirement, false)}
+                  className={clsx("rounded-lg px-3 py-2 text-xs font-medium transition-all duration-200", !requirement.provision ? "bg-amber-300/15 text-amber-100" : "text-white/45 hover:text-white")}
                 >
                   External
                 </button>
               </div>
             </div>
-            {dependency.evidence[0] && <p className="mt-2 text-xs leading-5 text-white/35">{dependency.evidence[0]}</p>}
+            {requirement.evidence[0] && <p className="mt-2 text-xs leading-5 text-white/35">{requirement.evidence[0]}</p>}
           </div>
-        ))}
+        )})}
+        {!consumers.length && <p className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-white/40">No selected app currently uses this service.</p>}
       </div>
-    </div>
+    </aside>
   );
 }
 
@@ -233,9 +268,13 @@ function CommunicationEnvPanel({ variables }: { variables: AutoEnvVar[] }) {
   );
 }
 
-function addExternalEnv(env: EnvVarPair[], dependency: ManagedDependencyKind): EnvVarPair[] {
-  const existing = new Set(env.map((item) => item.key));
-  const additions = externalEnvByDependency[dependency]
+function addExternalEnv(service: DetectedService, dependency: ManagedDependencyKind): EnvVarPair[] {
+  const existing = new Set(service.env.map((item) => item.key));
+  const detectedKeys = service.automaticEnv
+    .filter((item) => autoEnvBelongsToDependency(item, dependency))
+    .map((item) => item.key);
+  const keys = detectedKeys.length ? detectedKeys : externalEnvByDependency[dependency];
+  const additions = keys
     .filter((key) => !existing.has(key))
     .map((key) => ({
       id: `${dependency}-${key}`,
@@ -245,7 +284,7 @@ function addExternalEnv(env: EnvVarPair[], dependency: ManagedDependencyKind): E
       source: "external backing service",
       evidence: [`Provide ${key} because ${dependencyLabels[dependency]} is configured as external.`],
     }));
-  return [...env, ...additions];
+  return [...service.env, ...additions];
 }
 
 function removeExternalEnv(env: EnvVarPair[], dependency: ManagedDependencyKind): EnvVarPair[] {

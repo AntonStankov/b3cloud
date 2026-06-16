@@ -2683,11 +2683,10 @@ class PlatformCore:
             primary_backend = backend_components[0]
             for frontend in frontend_components:
                 if (frontend.path, primary_backend.path) not in links:
-                    env_names = ["VITE_API_URL", "VITE_BACKEND_URL", "API_URL", "BACKEND_URL"]
                     add_link(
                         frontend,
                         primary_backend,
-                        env_names,
+                        [],
                         "medium",
                         [
                             "Detected public frontend and backend in the same repository; b3cloud will inject frontend/backend URL aliases during multi-component deployment."
