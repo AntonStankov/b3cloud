@@ -16,7 +16,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 from urllib.parse import urlencode
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -576,6 +576,11 @@ def _deploy_component(
     communication_env: Dict[str, str],
 ) -> Dict[str, object]:
     service_requirements: List[ServiceRequirement] = []
+    requested_types = {
+        service.strip().lower()
+        for service in [*payload.provision_services, *component.provision_services]
+        if service.strip()
+    }
     if component.auto_detect_services and component.type in {"backend", "worker"}:
         svc.jobs.append_log(job_id, f"Analyzing {component.path} for backing service requirements.")
         analysis = svc.core.analyze_repository(
@@ -598,14 +603,13 @@ def _deploy_component(
                 type=str(item["type"]),
                 confidence=str(item.get("confidence", "medium")),
                 evidence=[str(evidence) for evidence in item.get("evidence", [])],
-                provision=True,
+                provision=str(item["type"]).strip().lower() in requested_types,
             )
             for item in detected
             if isinstance(item, dict)
         )
         svc.jobs.append_log(job_id, f"Detected services: {', '.join(s.type for s in service_requirements) or 'none'}.")
 
-    requested_types = {service.strip().lower() for service in component.provision_services if service.strip()}
     existing_types = {service.type for service in service_requirements}
     for service_type in sorted(requested_types - existing_types):
         service_requirements.append(
@@ -617,10 +621,13 @@ def _deploy_component(
             )
         )
 
+    reserved_managed_env = _managed_env_names_for_services(
+        service.type for service in service_requirements if service.provision
+    )
     user_env = {
         key: value
         for key, value in {**payload.env, **component.env}.items()
-        if key not in PlatformCore.PLATFORM_MANAGED_ENV_NAMES
+        if key not in reserved_managed_env
     }
     req = DeploymentRequest(
         github_url=payload.github_url,
@@ -660,6 +667,60 @@ def _deploy_component(
         }
     )
     return result
+
+
+def _managed_env_names_for_services(service_types: Iterable[str]) -> set[str]:
+    names = {"PORT"}
+    by_service = {
+        "postgres": {
+            "DATABASE_URL",
+            "DB_HOST",
+            "DB_NAME",
+            "DB_PASSWORD",
+            "DB_PORT",
+            "DB_USER",
+            "POSTGRES_URL",
+            "POSTGRES_HOST",
+            "POSTGRES_DB",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+        },
+        "mysql": {
+            "DATABASE_URL",
+            "DB_HOST",
+            "DB_NAME",
+            "DB_PASSWORD",
+            "DB_PORT",
+            "DB_USER",
+            "MYSQL_URL",
+            "MYSQL_HOST",
+            "MYSQL_DATABASE",
+            "MYSQL_USER",
+            "MYSQL_PASSWORD",
+        },
+        "mongodb": {
+            "DATABASE_URL",
+            "DB_HOST",
+            "DB_NAME",
+            "DB_PASSWORD",
+            "DB_PORT",
+            "DB_USER",
+            "MONGODB_URI",
+            "MONGO_URL",
+            "MONGODB_HOST",
+            "MONGODB_DATABASE",
+            "MONGODB_USER",
+            "MONGODB_PASSWORD",
+            "MONGO_INITDB_DATABASE",
+            "MONGO_INITDB_ROOT_USERNAME",
+            "MONGO_INITDB_ROOT_PASSWORD",
+        },
+        "redis": {"REDIS_URL", "REDIS_HOST"},
+        "rabbitmq": {"RABBITMQ_URL", "AMQP_URL", "RABBITMQ_HOST"},
+    }
+    for service_type in service_types:
+        names.update(by_service.get(service_type.strip().lower(), set()))
+    return names
 
 
 

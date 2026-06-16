@@ -11,6 +11,8 @@ interface ServiceCardProps {
 
 export function ServiceCard({ service, selected = false, onSelect }: ServiceCardProps) {
   const tone = serviceTone[service.kind];
+  const managedCount = service.dependencies.filter((dependency) => dependency.provision).length;
+  const externalCount = service.dependencies.length - managedCount;
   return (
     <motion.button
       layout
@@ -41,6 +43,11 @@ export function ServiceCard({ service, selected = false, onSelect }: ServiceCard
           <p className="mt-2 text-sm leading-6 text-white/55">
             {service.framework || tone.label}{service.port ? ` / :${service.port}` : ""}
           </p>
+          {!!service.dependencies.length && (
+            <p className="mt-2 font-mono text-[11px] uppercase tracking-[0.16em] text-white/35">
+              {managedCount} managed / {externalCount} external
+            </p>
+          )}
           {!!service.warnings.length && (
             <p className="mt-3 rounded-2xl border border-amber-300/10 bg-amber-300/5 px-3 py-2 text-xs leading-5 text-amber-100/70">
               {service.warnings[0]}

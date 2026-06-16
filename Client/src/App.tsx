@@ -3,12 +3,12 @@ import type { Session } from "@supabase/supabase-js";
 import { motion } from "framer-motion";
 import { analyze, deploy, getJob, health, listJobs } from "./api/apps";
 import { clearBearerToken, setBearerToken } from "./api/config";
-import type { AnalyzeResult, AnalyzedComponent, DeployJob } from "./api/types";
+import type { AnalyzeResult, AnalyzedComponent, DeployJob, ServiceType } from "./api/types";
 import { BlueprintPanel } from "./features/deployment/components/BlueprintPanel";
 import { LogTerminal } from "./features/deployment/components/LogTerminal";
 import { ServiceDetectionGrid } from "./features/deployment/components/ServiceDetectionGrid";
 import { DeploymentFlowProvider, useDeploymentFlow } from "./features/deployment/state/DeploymentFlowContext";
-import type { DetectedService, DeploymentEvent, DeploymentStatus, RepositorySummary, ServiceKind } from "./features/deployment/types";
+import type { AutoEnvVar, DetectedService, DeploymentEvent, DeploymentStatus, ManagedDependencyKind, RepositorySummary, ServiceKind } from "./features/deployment/types";
 import { supabase, supabaseConfigured } from "./supabase";
 
 interface GithubRepo {
@@ -237,7 +237,7 @@ function DeploymentExperience() {
           public: true,
           port: service.port ?? 8080,
           auto_detect_services: true,
-          provision_services: service.dependencies.filter((dependency) => ["postgres", "mysql", "mongodb", "redis", "rabbitmq"].includes(dependency)),
+          provision_services: service.dependencies.filter((dependency) => dependency.provision).map((dependency) => dependency.type),
           redeploy_services: false,
           env: Object.fromEntries(service.env.map((item) => [item.key, item.value]).filter(([key]) => key)),
         })),
@@ -632,12 +632,57 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     framework: component.framework || inferFramework(component),
     buildCommand: component.type === "frontend" ? "npm run build" : "",
     outputDirectory: component.type === "frontend" ? "dist" : "",
-    env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret })),
+    env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret, source: item.source, evidence: item.evidence })),
     instanceSize: "micro",
     monthlyEstimateUsd: component.type === "frontend" ? 9 : 18,
-    dependencies: component.services.map((service) => service.type),
+    dependencies: component.services.filter(isManagedDependency).map((service) => ({
+      type: service.type,
+      confidence: service.confidence,
+      evidence: service.evidence,
+      provision: service.provision,
+    })),
+    automaticEnv: autoEnvForComponent(component),
     warnings: component.warnings || [],
   };
+}
+
+function isManagedDependency(service: { type: ServiceType | string }): service is { type: ManagedDependencyKind; confidence: string; evidence: string[]; provision: boolean } {
+  return ["postgres", "mysql", "mongodb", "redis", "rabbitmq"].includes(service.type);
+}
+
+const autoEnvByDependency: Record<ManagedDependencyKind, string[]> = {
+  postgres: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"],
+  mysql: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MYSQL_URL", "MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_PASSWORD", "MYSQL_USER"],
+  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
+  redis: ["REDIS_URL", "REDIS_HOST"],
+  rabbitmq: ["RABBITMQ_URL", "AMQP_URL"],
+};
+
+function autoEnvForComponent(component: AnalyzedComponent): AutoEnvVar[] {
+  const env: AutoEnvVar[] = [
+    { key: "PORT", source: "platform runtime", secret: false, evidence: ["Injected by b3cloud to match the Kubernetes Service target port."] },
+  ];
+  for (const dependency of component.services.filter(isManagedDependency)) {
+    for (const key of autoEnvByDependency[dependency.type]) {
+      env.push({
+        key,
+        source: `${dependency.type} managed service`,
+        secret: !key.endsWith("_HOST") && key !== "DB_PORT",
+        evidence: dependency.evidence,
+      });
+    }
+  }
+  for (const item of component.env.filter((item) => item.platform_managed)) {
+    if (!env.some((existing) => existing.key === item.name)) {
+      env.push({
+        key: item.name,
+        source: item.source || "detected platform-managed env",
+        secret: item.secret,
+        evidence: item.evidence,
+      });
+    }
+  }
+  return env;
 }
 
 function inferKind(component: AnalyzedComponent): ServiceKind {

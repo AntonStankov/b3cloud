@@ -23,6 +23,8 @@ export type ServiceKind =
   | "static"
   | "unknown";
 
+export type ManagedDependencyKind = "postgres" | "mysql" | "mongodb" | "redis" | "rabbitmq";
+
 export type InstanceSize = "nano" | "micro" | "standard" | "performance";
 
 export interface WorkspaceDraft {
@@ -46,6 +48,22 @@ export interface EnvVarPair {
   key: string;
   value: string;
   secret: boolean;
+  source?: string;
+  evidence?: string[];
+}
+
+export interface AutoEnvVar {
+  key: string;
+  source: string;
+  secret: boolean;
+  evidence?: string[];
+}
+
+export interface ServiceDependency {
+  type: ManagedDependencyKind;
+  confidence: string;
+  evidence: string[];
+  provision: boolean;
 }
 
 export interface DetectedService {
@@ -61,7 +79,8 @@ export interface DetectedService {
   env: EnvVarPair[];
   instanceSize: InstanceSize;
   monthlyEstimateUsd: number;
-  dependencies: string[];
+  dependencies: ServiceDependency[];
+  automaticEnv: AutoEnvVar[];
   warnings: string[];
 }
 

@@ -61,15 +61,24 @@ export function EnvVarInput({ values, onChange }: EnvVarInputProps) {
       )}
       <div className="space-y-2">
         {values.map((item) => (
-          <div key={item.id} className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_auto_auto] gap-2 max-md:grid-cols-1">
-            <input value={item.key} onChange={(event) => update(item.id, { key: event.target.value })} placeholder="KEY" className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
-            <input value={item.value} onChange={(event) => update(item.id, { value: event.target.value })} placeholder="value" type={item.secret ? "password" : "text"} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
-            <button type="button" onClick={() => update(item.id, { secret: !item.secret })} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white/60">
-              {item.secret ? "secret" : "plain"}
-            </button>
-            <button type="button" onClick={() => removeRow(item.id)} className="rounded-xl border border-rose-300/10 bg-rose-400/5 px-3 py-2 font-mono text-xs text-rose-200/80">
-              remove
-            </button>
+          <div key={item.id} className="rounded-2xl border border-white/5 bg-[#0B0B0F]/35 p-2">
+            <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_auto_auto] gap-2 max-md:grid-cols-1">
+              <input value={item.key} onChange={(event) => update(item.id, { key: event.target.value })} placeholder="KEY" className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
+              <input value={item.value} onChange={(event) => update(item.id, { value: event.target.value })} placeholder="value" type={item.secret ? "password" : "text"} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
+              <button type="button" onClick={() => update(item.id, { secret: !item.secret })} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white/60">
+                {item.secret ? "secret" : "plain"}
+              </button>
+              <button type="button" onClick={() => removeRow(item.id)} className="rounded-xl border border-rose-300/10 bg-rose-400/5 px-3 py-2 font-mono text-xs text-rose-200/80">
+                remove
+              </button>
+            </div>
+            {(item.source || item.evidence?.[0]) && (
+              <p className="mt-2 px-1 text-xs leading-5 text-white/35">
+                {item.source && <span className="font-mono text-cyan-100/55">{item.source}</span>}
+                {item.source && item.evidence?.[0] ? " · " : ""}
+                {item.evidence?.[0]}
+              </p>
+            )}
           </div>
         ))}
         {!values.length && <div className="rounded-2xl border border-dashed border-white/10 p-4 text-sm text-white/40">No variables required yet.</div>}
