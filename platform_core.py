@@ -87,6 +87,14 @@ class DeployableComponent:
     env: list[EnvRequirement]
     services: list[ServiceRequirement]
     evidence: list[str]
+    language: str = "unknown"
+    framework: str = "unknown"
+    confidence: str = "medium"
+    warnings: list[str] = None
+
+    def __post_init__(self) -> None:
+        if self.warnings is None:
+            self.warnings = []
 
 
 @dataclass
@@ -1829,16 +1837,22 @@ class PlatformCore:
         if not candidates:
             candidates = [repo_dir]
 
-        candidates = cls._filter_delegating_parent_components(repo_dir, sorted(set(candidates)))
+        candidates = cls._filter_parent_components(repo_dir, sorted(set(candidates)))
 
         components: list[DeployableComponent] = []
         for path in sorted(candidates, key=lambda item: (len(item.relative_to(repo_dir).parts), str(item))):
             rel = "." if path == repo_dir else str(path.relative_to(repo_dir))
             name = sanitize_name(path.name if rel != "." else "app") or "app"
             component_type, evidence = cls._classify_component(path)
+            language, framework, confidence, metadata_warnings = cls._component_metadata(path, component_type, evidence)
             port, port_confidence, port_evidence = cls._detect_component_port(path, component_type)
             env_requirements = cls._detect_env_requirements(path)
             services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
+            warnings = list(metadata_warnings)
+            if port_confidence == "default":
+                warnings.append("No explicit port was found; using the platform default port 8080. Confirm this before deploying.")
+            if component_type in {"backend", "worker"} and not services:
+                warnings.append("No managed backing services were detected for this component.")
             components.append(
                 DeployableComponent(
                     name=name,
@@ -1851,22 +1865,53 @@ class PlatformCore:
                     env=env_requirements,
                     services=services,
                     evidence=evidence,
+                    language=language,
+                    framework=framework,
+                    confidence=confidence if port_confidence != "default" else "low",
+                    warnings=warnings,
                 )
             )
         return components
 
     @staticmethod
-    def _filter_delegating_parent_components(repo_dir: Path, candidates: list[Path]) -> list[Path]:
+    def _filter_parent_components(repo_dir: Path, candidates: list[Path]) -> list[Path]:
         candidate_set = set(candidates)
         filtered: list[Path] = []
         for path in candidates:
             has_child_candidate = any(
                 other != path and path in other.parents for other in candidate_set
             )
-            if has_child_candidate and PlatformCore._is_delegating_package(path):
+            if has_child_candidate and (
+                PlatformCore._is_delegating_package(path)
+                or PlatformCore._is_weak_parent_component(path)
+            ):
                 continue
             filtered.append(path)
         return filtered or candidates
+
+    @staticmethod
+    def _is_weak_parent_component(path: Path) -> bool:
+        package_json = path / "package.json"
+        if not package_json.exists():
+            return False
+        try:
+            package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+        scripts = package_data.get("scripts", {}) if isinstance(package_data, dict) else {}
+        dependencies = package_data.get("dependencies", {}) if isinstance(package_data, dict) else {}
+        dev_dependencies = package_data.get("devDependencies", {}) if isinstance(package_data, dict) else {}
+        workspaces = package_data.get("workspaces")
+        if workspaces:
+            return True
+        combined = {**dependencies, **dev_dependencies}
+        framework_markers = {
+            "express", "fastify", "koa", "hapi", "@nestjs/core", "next", "vite", "react", "vue", "@angular/core"
+        }
+        has_framework = bool(framework_markers.intersection(combined))
+        has_direct_start = isinstance(scripts.get("start"), str) and "--prefix" not in scripts.get("start", "")
+        source_markers = any((path / name).exists() for name in ("src", "server.js", "server.ts", "app.js", "app.ts", "index.js", "index.ts"))
+        return not (has_framework or has_direct_start or source_markers)
 
     @staticmethod
     def _is_delegating_package(path: Path) -> bool:
@@ -2081,8 +2126,8 @@ class PlatformCore:
             except (OSError, json.JSONDecodeError):
                 pass
 
-        frontend_deps = {"vite", "@vitejs/plugin-react", "react", "react-dom", "next", "nuxt", "vue", "@angular/core"}
-        backend_deps = {"express", "fastify", "koa", "hapi", "nestjs", "@nestjs/core", "pg", "mysql2", "mongoose", "redis", "ioredis", "amqplib"}
+        frontend_deps = {"vite", "@vitejs/plugin-react", "react", "react-dom", "next", "nuxt", "vue", "@angular/core", "svelte"}
+        backend_deps = {"express", "fastify", "koa", "hapi", "nestjs", "@nestjs/core", "pg", "mysql2", "mongoose", "redis", "ioredis", "amqplib", "socket.io"}
         if frontend_deps.intersection(dependencies) and not backend_deps.intersection(dependencies):
             evidence.append("frontend JavaScript dependencies")
             return "frontend", evidence
@@ -2092,17 +2137,36 @@ class PlatformCore:
         if (app_dir / "requirements.txt").exists() or (app_dir / "pyproject.toml").exists():
             text = ((app_dir / "requirements.txt").read_text(errors="ignore") if (app_dir / "requirements.txt").exists() else "").lower()
             text += ((app_dir / "pyproject.toml").read_text(errors="ignore") if (app_dir / "pyproject.toml").exists() else "").lower()
-            if any(marker in text for marker in ("fastapi", "flask", "django", "uvicorn", "gunicorn")):
+            if any(marker in text for marker in ("fastapi", "flask", "django", "uvicorn", "gunicorn", "starlette", "quart")):
                 evidence.append("Python web framework")
                 return "backend", evidence
             evidence.append("Python project")
+            return "worker", evidence
+        if (app_dir / "composer.json").exists() or any((app_dir / name).exists() for name in ("artisan", "public/index.php", "index.php")):
+            composer = PlatformCore._read_json_file(app_dir / "composer.json")
+            requires = {**composer.get("require", {}), **composer.get("require-dev", {})} if isinstance(composer, dict) else {}
+            if any(dep in requires for dep in ("laravel/framework", "symfony/framework-bundle", "slim/slim", "cakephp/cakephp", "laminas/laminas-mvc")):
+                evidence.append("PHP web framework")
+                return "backend", evidence
+            if (app_dir / "public/index.php").exists() or (app_dir / "index.php").exists():
+                evidence.append("PHP web entrypoint")
+                return "backend", evidence
+            evidence.append("PHP Composer project")
             return "worker", evidence
         if (app_dir / "go.mod").exists():
             evidence.append("Go module")
             return "backend", evidence
         if (app_dir / "pom.xml").exists() or (app_dir / "build.gradle").exists():
+            java_text = ""
+            for filename in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                path = app_dir / filename
+                if path.exists():
+                    java_text += path.read_text(errors="ignore").lower()
+            if any(marker in java_text for marker in ("spring-boot-starter-web", "quarkus-resteasy", "quarkus-rest", "micronaut-http-server", "jakarta.servlet", "javax.servlet")):
+                evidence.append("Java web framework")
+                return "backend", evidence
             evidence.append("Java project")
-            return "backend", evidence
+            return "worker", evidence
         if isinstance(scripts.get("start"), str):
             evidence.append("package.json start script")
             return "backend", evidence
@@ -2111,6 +2175,76 @@ class PlatformCore:
             return "worker", evidence
         evidence.append("deployable project marker")
         return "worker", evidence
+
+    @staticmethod
+    def _component_metadata(app_dir: Path, component_type: str, evidence: list[str]) -> tuple[str, str, str, list[str]]:
+        lowered = " ".join(evidence).lower()
+        warnings: list[str] = []
+        if (app_dir / "composer.json").exists() or "php" in lowered:
+            composer = PlatformCore._read_json_file(app_dir / "composer.json")
+            requires = {**composer.get("require", {}), **composer.get("require-dev", {})} if isinstance(composer, dict) else {}
+            if "laravel/framework" in requires:
+                return "php", "Laravel", "high", warnings
+            if "symfony/framework-bundle" in requires:
+                return "php", "Symfony", "high", warnings
+            if "slim/slim" in requires:
+                return "php", "Slim", "high", warnings
+            if "cakephp/cakephp" in requires:
+                return "php", "CakePHP", "high", warnings
+            if "PHP web entrypoint" in evidence:
+                return "php", "PHP web app", "medium", warnings
+            warnings.append("PHP project detected, but no supported web framework was identified automatically.")
+            return "php", "PHP", "medium", warnings
+        if (app_dir / "pom.xml").exists() or (app_dir / "build.gradle").exists():
+            text = ""
+            for filename in ("pom.xml", "build.gradle", "build.gradle.kts"):
+                path = app_dir / filename
+                if path.exists():
+                    text += path.read_text(errors="ignore").lower()
+            if "spring-boot" in text:
+                return "java", "Spring Boot", "high", warnings
+            if "quarkus" in text:
+                return "java", "Quarkus", "high", warnings
+            if "micronaut" in text:
+                return "java", "Micronaut", "high", warnings
+            warnings.append("Java project detected, but no web framework was identified; it may be a worker or library.")
+            return "java", "Java", "medium", warnings
+        if (app_dir / "requirements.txt").exists() or (app_dir / "pyproject.toml").exists():
+            text = ((app_dir / "requirements.txt").read_text(errors="ignore") if (app_dir / "requirements.txt").exists() else "").lower()
+            text += ((app_dir / "pyproject.toml").read_text(errors="ignore") if (app_dir / "pyproject.toml").exists() else "").lower()
+            for framework in ("fastapi", "django", "flask"):
+                if framework in text:
+                    return "python", framework.title(), "high", warnings
+            return "python", "Python", "medium", warnings
+        if (app_dir / "go.mod").exists():
+            return "go", "Go", "medium", warnings
+        if (app_dir / "package.json").exists():
+            package = PlatformCore._read_json_file(app_dir / "package.json")
+            deps = {**package.get("dependencies", {}), **package.get("devDependencies", {})} if isinstance(package, dict) else {}
+            if "next" in deps:
+                return "javascript", "Next.js", "high", warnings
+            if "vite" in deps and "react" in deps:
+                return "javascript", "Vite React", "high", warnings
+            if "react" in deps:
+                return "javascript", "React", "medium", warnings
+            if "express" in deps:
+                return "javascript", "Express", "high", warnings
+            if "fastify" in deps:
+                return "javascript", "Fastify", "high", warnings
+            if "@nestjs/core" in deps:
+                return "javascript", "NestJS", "high", warnings
+            warnings.append("Node package detected, but no supported frontend/backend framework or start script was found.")
+            return "javascript", "Node package", "low", warnings
+        warnings.append("No supported framework marker was found. Review component path and build settings manually.")
+        return "unknown", "unknown", "low", warnings
+
+    @staticmethod
+    def _read_json_file(path: Path) -> Dict[str, object]:
+        try:
+            value = json.loads(path.read_text())
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     @staticmethod
     def _infer_build_env(app_dir: Path) -> Dict[str, str]:

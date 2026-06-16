@@ -39,8 +39,13 @@ export function ServiceCard({ service, selected = false, onSelect }: ServiceCard
           <p className="mb-2 font-mono text-xs text-cyan-200/70">{service.path}</p>
           <h3 className="text-xl font-semibold tracking-[-0.03em] text-white">{service.name}</h3>
           <p className="mt-2 text-sm leading-6 text-white/55">
-            {tone.label}{service.framework ? ` / ${service.framework}` : ""}{service.port ? ` / :${service.port}` : ""}
+            {service.framework || tone.label}{service.port ? ` / :${service.port}` : ""}
           </p>
+          {!!service.warnings.length && (
+            <p className="mt-3 rounded-2xl border border-amber-300/10 bg-amber-300/5 px-3 py-2 text-xs leading-5 text-amber-100/70">
+              {service.warnings[0]}
+            </p>
+          )}
         </div>
         <div className="space-y-3">
           <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.06]">

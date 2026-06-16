@@ -15,6 +15,8 @@ export type ServiceKind =
   | "node"
   | "python"
   | "go"
+  | "php"
+  | "java"
   | "postgres"
   | "redis"
   | "worker"
@@ -60,6 +62,7 @@ export interface DetectedService {
   instanceSize: InstanceSize;
   monthlyEstimateUsd: number;
   dependencies: string[];
+  warnings: string[];
 }
 
 export interface DeploymentEvent {

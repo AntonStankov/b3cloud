@@ -36,6 +36,10 @@ export interface AnalyzedComponent {
   env: EnvRequirement[];
   services: ServiceRequirement[];
   evidence: string[];
+  language?: string;
+  framework?: string;
+  confidence?: "high" | "medium" | "low" | string;
+  warnings?: string[];
 }
 
 export interface AnalyzeResult {

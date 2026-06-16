@@ -1383,10 +1383,27 @@ def analyze_app(
 ) -> Dict[str, object]:
     svc.auth(x_api_key, authorization)
     defaults = svc.defaults_from_github_url(payload.github_url)
-    analysis = svc.core.analyze_repository(payload.github_url, payload.git_revision, github_token=payload.github_token)
+    try:
+        analysis = svc.core.analyze_repository(payload.github_url, payload.git_revision, github_token=payload.github_token)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=422, detail=_friendly_analysis_error(str(exc))) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     analysis.update(defaults)
     return analysis
 
+
+
+
+def _friendly_analysis_error(message: str) -> str:
+    lowered = message.lower()
+    if "pathspec" in lowered and "did not match" in lowered:
+        return "The requested Git revision was not found. Leave the revision empty to use the repository default branch, or enter an existing branch/tag/SHA."
+    if "authentication failed" in lowered or "requested url returned error: 403" in lowered or "repository not found" in lowered:
+        return "The repository could not be cloned. Reconnect GitHub and make sure B3Cloud has access to this repository."
+    if "could not read username" in lowered:
+        return "The repository requires authentication. Reconnect GitHub before analyzing private repositories."
+    return f"Repository inspection failed: {message[:1200]}"
 
 @app.post("/apps/deploy")
 def deploy_app(

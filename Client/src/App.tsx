@@ -628,25 +628,30 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     kind: inferKind(component),
     path: component.path,
     port: component.port,
-    confidence: component.port_confidence === "high" ? "high" : component.port_confidence === "default" ? "low" : "medium",
-    framework: inferFramework(component),
+    confidence: component.confidence === "high" ? "high" : component.confidence === "low" || component.port_confidence === "default" ? "low" : "medium",
+    framework: component.framework || inferFramework(component),
     buildCommand: component.type === "frontend" ? "npm run build" : "",
     outputDirectory: component.type === "frontend" ? "dist" : "",
     env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret })),
     instanceSize: "micro",
     monthlyEstimateUsd: component.type === "frontend" ? 9 : 18,
     dependencies: component.services.map((service) => service.type),
+    warnings: component.warnings || [],
   };
 }
 
 function inferKind(component: AnalyzedComponent): ServiceKind {
+  const language = (component.language || "").toLowerCase();
+  const framework = (component.framework || "").toLowerCase();
   const evidence = [...component.evidence, ...component.port_evidence, component.name, component.path].join(" ").toLowerCase();
-  if (evidence.includes("next")) return "nextjs";
-  if (component.type === "frontend") return "react";
-  if (evidence.includes("python")) return "python";
-  if (evidence.includes("go module") || evidence.includes("go.mod")) return "go";
+  if (framework.includes("next")) return "nextjs";
+  if (framework.includes("react") || component.type === "frontend") return "react";
+  if (language === "php") return "php";
+  if (language === "java") return "java";
+  if (language === "python" || evidence.includes("python")) return "python";
+  if (language === "go" || evidence.includes("go module") || evidence.includes("go.mod")) return "go";
   if (component.type === "worker") return "worker";
-  if (evidence.includes("backend javascript") || evidence.includes("express") || evidence.includes("fastify") || evidence.includes("nestjs")) return "node";
+  if (framework.includes("express") || framework.includes("fastify") || framework.includes("nestjs") || evidence.includes("backend javascript")) return "node";
   return "unknown";
 }
 
