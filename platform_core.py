@@ -2413,20 +2413,9 @@ class PlatformCore:
             )
             return
 
-        npm_path = shutil.which("npm")
-        if not npm_path:
-            return
-
         try:
-            result = subprocess.run(
-                [npm_path, "ci", "--dry-run", "--ignore-scripts", "--no-audit", "--no-fund"],
-                cwd=app_dir,
-                text=True,
-                capture_output=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            result = PlatformCore._run_npm_ci_dry_run(app_dir)
+        except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
             PlatformCore._emit_status(
                 status_callback,
                 f"Skipped npm lockfile preflight because npm could not complete quickly: {exc}.",
@@ -2449,6 +2438,46 @@ class PlatformCore:
         PlatformCore._emit_status(
             status_callback,
             "npm ci preflight failed for a reason unrelated to lockfile sync; Buildpacks will run and report the full error.",
+        )
+
+    @staticmethod
+    def _run_npm_ci_dry_run(app_dir: Path) -> subprocess.CompletedProcess[str]:
+        npm_path = shutil.which("npm")
+        if npm_path:
+            return subprocess.run(
+                [npm_path, "ci", "--dry-run", "--ignore-scripts", "--no-audit", "--no-fund"],
+                cwd=app_dir,
+                text=True,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+
+        docker_path = shutil.which("docker")
+        if not docker_path:
+            raise RuntimeError("neither npm nor docker is available for lockfile preflight")
+
+        return subprocess.run(
+            [
+                docker_path,
+                "run",
+                "--rm",
+                "-v",
+                f"{app_dir.resolve()}:/workspace",
+                "-w",
+                "/workspace",
+                "docker.io/library/node:24-bookworm-slim",
+                "npm",
+                "ci",
+                "--dry-run",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=180,
+            check=False,
         )
 
     @staticmethod
