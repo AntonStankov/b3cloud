@@ -624,9 +624,18 @@ def _deploy_component(
     reserved_managed_env = _managed_env_names_for_services(
         service.type for service in service_requirements if service.provision
     )
+    combined_user_env = {**payload.env, **component.env}
+    ignored_managed_env = sorted(key for key in combined_user_env if key in reserved_managed_env)
+    if ignored_managed_env:
+        svc.jobs.append_log(
+            job_id,
+            "Ignoring user-provided values for platform-managed env vars because managed services are enabled: "
+            + ", ".join(ignored_managed_env[:20])
+            + (" ..." if len(ignored_managed_env) > 20 else ""),
+        )
     user_env = {
         key: value
-        for key, value in {**payload.env, **component.env}.items()
+        for key, value in combined_user_env.items()
         if key not in reserved_managed_env
     }
     req = DeploymentRequest(

@@ -56,6 +56,7 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
   const automaticEnv = dedupeAutoEnv(
     service.automaticEnv.filter((item) => shouldShowAutoEnv(item, provisionedDependencies))
   );
+  const reservedRuntimeKeys = dedupeAutoEnv([...automaticEnv, ...service.communicationEnv]).map((item) => item.key);
 
   return (
     <aside className="sticky top-24 max-h-[calc(100vh-7rem)] overflow-y-auto rounded-[30px] border border-white/5 bg-[#12121A]/90 p-5 shadow-tactile backdrop-blur-md max-xl:static max-xl:max-h-none">
@@ -122,7 +123,7 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
         <DependencySummary service={service} />
         <AutomaticEnvPanel dependencies={provisionedDependencies} variables={automaticEnv} />
         <CommunicationEnvPanel variables={service.communicationEnv} />
-        <EnvVarInput values={service.env} onChange={(env) => onChange(service.id, { env })} />
+        <EnvVarInput values={service.env} reservedKeys={reservedRuntimeKeys} onChange={(env) => onChange(service.id, { env })} />
       </div>
     </aside>
   );
@@ -288,7 +289,7 @@ function addExternalEnv(service: DetectedService, dependency: ManagedDependencyK
 }
 
 function removeExternalEnv(env: EnvVarPair[], dependency: ManagedDependencyKind): EnvVarPair[] {
-  const keys = new Set(externalEnvByDependency[dependency]);
+  const keys = new Set([...externalEnvByDependency[dependency], ...autoEnvByDependency[dependency]]);
   return env.filter((item) => !keys.has(item.key) || item.source !== "external backing service");
 }
 
@@ -311,3 +312,11 @@ function shouldShowAutoEnv(item: AutoEnvVar, provisionedDependencies: ServiceDep
   if (!backingDependency) return true;
   return provisionedDependencies.some((dependency) => dependency.type === backingDependency);
 }
+
+const autoEnvByDependency: Record<ManagedDependencyKind, string[]> = {
+  postgres: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"],
+  mysql: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MYSQL_URL", "MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_PASSWORD", "MYSQL_USER"],
+  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
+  redis: ["REDIS_URL", "REDIS_HOST"],
+  rabbitmq: ["RABBITMQ_URL", "AMQP_URL", "RABBITMQ_HOST"],
+};
