@@ -21,7 +21,7 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
   }
 
   function addRow() {
-    onChange([...values, { id: crypto.randomUUID(), key: "", value: "", secret: true }]);
+    onChange([...values, { id: createClientId(), key: "", value: "", secret: true }]);
   }
 
   function removeRow(id: string) {
@@ -38,7 +38,7 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
         return false;
       })
       .map((item) => ({
-        id: crypto.randomUUID(),
+        id: createClientId(),
         key: item.key,
         value: item.value,
         secret: true,
@@ -170,4 +170,12 @@ function unquoteEnvValue(value: string): string {
   }
   const unquoted = value.slice(1, -1);
   return quote === "\"" ? unquoted.replace(/\\n/g, "\n").replace(/\\"/g, "\"") : unquoted;
+}
+
+function createClientId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const random = Math.random().toString(36).slice(2);
+  return `env-${Date.now().toString(36)}-${random}`;
 }
