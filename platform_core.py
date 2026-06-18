@@ -597,6 +597,7 @@ class PlatformCore:
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
             self._prepare_java_start_command(app_dir, status_callback=status_callback)
+            self._prepare_java_runtime_defaults(app_dir, req, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -2416,6 +2417,50 @@ class PlatformCore:
             status_callback,
             "Detected Quarkus Maven app; configured target/quarkus-app/quarkus-run.jar as the web launch process.",
         )
+
+    @staticmethod
+    def _prepare_java_runtime_defaults(
+        app_dir: Path,
+        req: DeploymentRequest,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        if not (app_dir / "pom.xml").exists() and not (app_dir / "build.gradle").exists() and not (app_dir / "build.gradle.kts").exists():
+            return
+
+        defaults = {
+            "BPL_JVM_THREAD_COUNT": "50",
+            "BPL_JVM_HEAD_ROOM": "5",
+        }
+        applied = []
+        for key, value in defaults.items():
+            if key not in req.env:
+                req.env[key] = value
+                applied.append(f"{key}={value}")
+
+        memory_limit_mib = PlatformCore._memory_quantity_to_mib(req.resources.memory_limit)
+        if memory_limit_mib and memory_limit_mib < 768:
+            req.resources.memory_limit = "768Mi"
+            if PlatformCore._memory_quantity_to_mib(req.resources.memory_request) < 256:
+                req.resources.memory_request = "256Mi"
+            applied.append("memory_limit=768Mi")
+
+        if applied:
+            PlatformCore._emit_status(
+                status_callback,
+                "Detected Java runtime; applied safe JVM/container defaults: " + ", ".join(applied) + ".",
+            )
+
+    @staticmethod
+    def _memory_quantity_to_mib(value: str) -> int:
+        cleaned = str(value or "").strip()
+        match = re.match(r"^(\d+)(Mi|M|Gi|G)?$", cleaned, re.IGNORECASE)
+        if not match:
+            return 0
+        amount = int(match.group(1))
+        unit = (match.group(2) or "Mi").lower()
+        if unit in {"gi", "g"}:
+            return amount * 1024
+        return amount
 
     @staticmethod
     def _prepare_static_frontend_build(
