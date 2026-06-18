@@ -28,7 +28,9 @@ require_env CLOUDFLARE_ZONE_ID
 require_env CLOUDFLARE_TUNNEL_ID
 require_env CF_ACCOUNT_ID
 
-LEGACY_USER_DOMAIN="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}"
+if [[ -z "${LEGACY_USER_DOMAIN:-}" ]]; then
+  LEGACY_USER_DOMAIN="old-${USER_DOMAIN%%.*}.${USER_DOMAIN#*.}"
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update

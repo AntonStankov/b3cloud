@@ -31,6 +31,17 @@ monitoring_origin = os.environ.get(
 tunnel_target = f"{tunnel_id}.cfargotunnel.com"
 
 
+def flat_legacy_domain(hostname: str) -> str:
+    parts = hostname.split(".", 1)
+    if len(parts) != 2:
+        return f"old-{hostname}"
+    return f"old-{parts[0]}.{parts[1]}"
+
+
+if legacy_user_domain == f"old.{user_domain}":
+    legacy_user_domain = flat_legacy_domain(user_domain)
+
+
 def call(method: str, path: str, payload: dict | None = None) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     req = request.Request(

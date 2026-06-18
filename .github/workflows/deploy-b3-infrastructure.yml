@@ -105,7 +105,7 @@ jobs:
           ssh -i ~/.ssh/b3_api_key "$REMOTE_USER@$REMOTE_HOST" \
             ADMIN_DOMAIN="$ADMIN_DOMAIN" \
             USER_DOMAIN="$USER_DOMAIN" \
-            LEGACY_USER_DOMAIN="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}" \
+            LEGACY_USER_DOMAIN="${LEGACY_USER_DOMAIN:-}" \
             ADMIN_TOKEN="$ADMIN_TOKEN" \
             USER_API_KEY="$USER_API_KEY" \
             CLUSTER_DOMAIN="$CLUSTER_DOMAIN" \
@@ -134,14 +134,20 @@ jobs:
           USER_ORIGIN: http://${{ secrets.B3_API_HOST }}
         run: |
           set -euo pipefail
-          export LEGACY_USER_DOMAIN="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}"
+          if [[ -z "${LEGACY_USER_DOMAIN:-}" ]]; then
+            LEGACY_USER_DOMAIN="old-${USER_DOMAIN%%.*}.${USER_DOMAIN#*.}"
+          fi
+          export LEGACY_USER_DOMAIN
           python scripts/sync_cloudflare_routes.py
 
       - name: Verify public endpoints
         shell: bash
         run: |
           set -euo pipefail
-          legacy_domain="${LEGACY_USER_DOMAIN:-old.$USER_DOMAIN}"
+          legacy_domain="${LEGACY_USER_DOMAIN:-}"
+          if [[ -z "$legacy_domain" ]]; then
+            legacy_domain="old-${USER_DOMAIN%%.*}.${USER_DOMAIN#*.}"
+          fi
 
           retry_curl() {
             local url="$1"
