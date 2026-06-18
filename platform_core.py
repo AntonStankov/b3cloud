@@ -596,6 +596,7 @@ class PlatformCore:
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
+            self._prepare_java_start_command(app_dir, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -2303,6 +2304,7 @@ class PlatformCore:
         except OSError:
             return {}
 
+        env: Dict[str, str] = {}
         version_patterns = (
             r"<java\.version>\s*([^<\s]+)\s*</java\.version>",
             r"<maven\.compiler\.release>\s*([^<\s]+)\s*</maven\.compiler\.release>",
@@ -2315,13 +2317,17 @@ class PlatformCore:
                 continue
             major = PlatformCore._normalize_java_major(match.group(1))
             if major:
-                return {"BP_JVM_VERSION": f"{major}.*"}
+                env["BP_JVM_VERSION"] = f"{major}.*"
+                break
+
+        if "quarkus-maven-plugin" in pom or "io.quarkus" in pom:
+            env["BP_MAVEN_BUILT_ARTIFACT"] = "target/quarkus-app/quarkus-run.jar"
 
         # Lombok and older annotation processors often break on the latest JDK with
         # javac internals errors; Java 17 is the safest default for Spring Boot 3.x.
-        if "org.projectlombok" in pom or "spring-boot" in pom:
-            return {"BP_JVM_VERSION": "17.*"}
-        return {}
+        if "BP_JVM_VERSION" not in env and ("org.projectlombok" in pom or "spring-boot" in pom):
+            env["BP_JVM_VERSION"] = "17.*"
+        return env
 
     @staticmethod
     def _normalize_java_major(value: str) -> str:
@@ -2386,6 +2392,30 @@ class PlatformCore:
         except OSError:
             return False
         return "wrapperUrl" in content
+
+    @staticmethod
+    def _prepare_java_start_command(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        pom_xml = app_dir / "pom.xml"
+        procfile = app_dir / "Procfile"
+        if not pom_xml.exists() or procfile.exists():
+            return
+
+        try:
+            pom = pom_xml.read_text(errors="ignore")
+        except OSError:
+            return
+
+        if "quarkus-maven-plugin" not in pom and "io.quarkus" not in pom:
+            return
+
+        procfile.write_text("web: java -jar target/quarkus-app/quarkus-run.jar\n")
+        PlatformCore._emit_status(
+            status_callback,
+            "Detected Quarkus Maven app; configured target/quarkus-app/quarkus-run.jar as the web launch process.",
+        )
 
     @staticmethod
     def _prepare_static_frontend_build(
