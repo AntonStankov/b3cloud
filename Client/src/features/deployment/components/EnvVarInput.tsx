@@ -11,6 +11,7 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
   const [bulkOpen, setBulkOpen] = useState(false);
   const [ignoredKeys, setIgnoredKeys] = useState<string[]>([]);
   const [importedKeys, setImportedKeys] = useState<string[]>([]);
+  const [showValues, setShowValues] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bulkValue = useMemo(() => values.map((item) => `${item.key}=${item.value}`).join("\n"), [values]);
   const reservedKeySet = useMemo(() => new Set(reservedKeys.map((key) => key.trim().toUpperCase()).filter(Boolean)), [reservedKeys]);
@@ -86,6 +87,9 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
           <button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 text-sm text-white/70 transition-all duration-200 hover:text-white">
             Import .env file
           </button>
+          <button type="button" onClick={() => setShowValues((value) => !value)} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 text-sm text-white/70 transition-all duration-200 hover:text-white">
+            {showValues ? "Hide values" : "Show values"}
+          </button>
           <button type="button" onClick={() => setBulkOpen((value) => !value)} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 text-sm text-white/70 transition-all duration-200 hover:text-white">
             Bulk import
           </button>
@@ -110,7 +114,7 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
       )}
       {importedKeys.length > 0 && (
         <div className="mb-4 rounded-2xl border border-emerald-300/10 bg-emerald-300/[0.035] p-3 text-xs leading-5 text-emerald-100/75">
-          Imported editable variables:
+          Imported editable variables. Values are shown in the rows below and can be edited before deployment:
           <span className="ml-1 font-mono">{importedKeys.join(", ")}</span>
         </div>
       )}
@@ -119,7 +123,7 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
           <div key={item.id} className="rounded-2xl border border-white/5 bg-[#0B0B0F]/35 p-2">
             <div className="grid grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)_auto_auto] gap-2 max-md:grid-cols-1">
               <input value={item.key} onChange={(event) => update(item.id, { key: event.target.value })} placeholder="KEY" className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
-              <input value={item.value} onChange={(event) => update(item.id, { value: event.target.value })} placeholder="value" type={item.secret ? "password" : "text"} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
+              <input value={item.value} onChange={(event) => update(item.id, { value: event.target.value })} placeholder="value" type={showValues ? "text" : item.secret ? "password" : "text"} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-sm text-white outline-none placeholder:text-white/25" />
               <button type="button" onClick={() => update(item.id, { secret: !item.secret })} className="rounded-xl border border-white/5 bg-white/[0.04] px-3 py-2 font-mono text-xs text-white/60">
                 {item.secret ? "secret" : "plain"}
               </button>
