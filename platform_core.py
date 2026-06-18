@@ -2402,18 +2402,104 @@ class PlatformCore:
 
         missing = sorted(name for name in wanted if name not in locked)
         changed = sorted(name for name, version in wanted.items() if name in locked and locked[name] != version)
-        if not missing and not changed:
+        if missing or changed:
+            shown_missing = ", ".join(missing[:8]) or "none"
+            shown_changed = ", ".join(changed[:8]) or "none"
+            PlatformCore._ignore_stale_node_lockfile(
+                app_dir,
+                status_callback,
+                "Detected package.json/package-lock.json mismatch; ignoring stale package-lock.json for this build "
+                f"so Buildpacks can run npm install. Missing: {shown_missing}. Changed: {shown_changed}.",
+            )
             return
 
-        ignored_path = app_dir / "package-lock.b3cloud-ignored.json"
-        package_lock.replace(ignored_path)
-        shown_missing = ", ".join(missing[:8]) or "none"
-        shown_changed = ", ".join(changed[:8]) or "none"
+        npm_path = shutil.which("npm")
+        if not npm_path:
+            return
+
+        try:
+            result = subprocess.run(
+                [npm_path, "ci", "--dry-run", "--ignore-scripts", "--no-audit", "--no-fund"],
+                cwd=app_dir,
+                text=True,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            PlatformCore._emit_status(
+                status_callback,
+                f"Skipped npm lockfile preflight because npm could not complete quickly: {exc}.",
+            )
+            return
+
+        output = "\n".join(part for part in (result.stderr, result.stdout) if part).strip()
+        if result.returncode == 0:
+            return
+        if PlatformCore._is_npm_lock_sync_error(output):
+            details = PlatformCore._summarize_npm_lock_sync_error(output)
+            PlatformCore._ignore_stale_node_lockfile(
+                app_dir,
+                status_callback,
+                "Detected package-lock.json that npm ci cannot use; ignoring stale package-lock.json for this build "
+                f"so Buildpacks can run npm install. {details}",
+            )
+            return
+
         PlatformCore._emit_status(
             status_callback,
-            "Detected package.json/package-lock.json mismatch; ignoring stale package-lock.json for this build "
-            f"so Buildpacks can run npm install. Missing: {shown_missing}. Changed: {shown_changed}.",
+            "npm ci preflight failed for a reason unrelated to lockfile sync; Buildpacks will run and report the full error.",
         )
+
+    @staticmethod
+    def _ignore_stale_node_lockfile(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]],
+        message: str,
+    ) -> None:
+        package_lock = app_dir / "package-lock.json"
+        if not package_lock.exists():
+            return
+        ignored_path = app_dir / "package-lock.b3cloud-ignored.json"
+        counter = 1
+        while ignored_path.exists():
+            ignored_path = app_dir / f"package-lock.b3cloud-ignored.{counter}.json"
+            counter += 1
+        package_lock.replace(ignored_path)
+        PlatformCore._emit_status(status_callback, message)
+
+    @staticmethod
+    def _is_npm_lock_sync_error(output: str) -> bool:
+        normalized = output.lower()
+        return (
+            "npm ci` can only install packages when your package.json and package-lock.json" in normalized
+            or "can only install packages when your package.json and package-lock.json" in normalized
+            or "from lock file" in normalized
+            or "package-lock.json is out of date" in normalized
+        )
+
+    @staticmethod
+    def _summarize_npm_lock_sync_error(output: str) -> str:
+        missing: list[str] = []
+        invalid: list[str] = []
+        for line in output.splitlines():
+            cleaned = re.sub(r"^npm\s+(?:error|warn|notice)\s*", "", line.strip(), flags=re.IGNORECASE)
+            missing_match = re.search(r"Missing:\s+([^@\s]+@[^,\s]+|@[^\s]+)\s+from lock file", cleaned)
+            invalid_match = re.search(r"Invalid:\s+(.+?)\s+from lock file", cleaned)
+            if missing_match:
+                missing.append(missing_match.group(1))
+            elif invalid_match:
+                invalid.append(invalid_match.group(1))
+        parts: list[str] = []
+        if missing:
+            parts.append("Missing lock entries: " + ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else ""))
+        if invalid:
+            parts.append("Invalid lock entries: " + ", ".join(invalid[:4]) + (" ..." if len(invalid) > 4 else ""))
+        if not parts:
+            parts.append("The repository should run npm install and commit the updated package-lock.json.")
+        else:
+            parts.append("The repository should still commit a regenerated package-lock.json for reproducible builds.")
+        return " ".join(parts)
 
     @staticmethod
     def _prepare_python_start_command(
