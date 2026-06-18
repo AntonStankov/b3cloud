@@ -215,6 +215,16 @@ function DeploymentExperience() {
       setError("Select at least one detected service to deploy.");
       return;
     }
+    const missingEnv = deployableServices.flatMap((service) =>
+      service.env
+        .filter((item) => item.required !== false && !item.value.trim())
+        .map((item) => `${service.name}:${item.key}`)
+    );
+    if (missingEnv.length) {
+      setError(`Fill or remove empty required environment variables before deploying: ${missingEnv.slice(0, 12).join(", ")}${missingEnv.length > 12 ? " ..." : ""}`);
+      dispatch({ type: "SET_STEP", step: "blueprint" });
+      return;
+    }
     setBusy("deploy");
     setError("");
     dispatch({ type: "SET_STEP", step: "ignition" });
@@ -252,7 +262,7 @@ function DeploymentExperience() {
           auto_detect_services: true,
           provision_services: service.dependencies.filter((dependency) => dependency.provision).map((dependency) => dependency.type),
           redeploy_services: false,
-          env: Object.fromEntries(service.env.map((item) => [item.key, item.value]).filter(([key]) => key)),
+          env: Object.fromEntries(service.env.map((item) => [item.key.trim(), item.value]).filter(([key, value]) => key && String(value).trim() !== "")),
         })),
       });
       setActiveJob(job);
@@ -694,7 +704,7 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     framework: component.framework || inferFramework(component),
     buildCommand: component.type === "frontend" ? "npm run build" : "",
     outputDirectory: component.type === "frontend" ? "dist" : "",
-    env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret, source: item.source, evidence: item.evidence })),
+    env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret, required: item.required, source: item.source, evidence: item.evidence })),
     instanceSize: "micro",
     monthlyEstimateUsd: component.type === "frontend" ? 9 : 18,
     dependencies: component.services.filter(isManagedDependency).map((service) => ({
@@ -716,7 +726,9 @@ function componentPublicHost(component: AnalyzedComponent, result: AnalyzeResult
     return repoDomain;
   }
   const componentName = sanitizeHostnamePart(component.name || component.path.split("/").filter(Boolean).pop() || "app");
-  return `${componentName}.${repoDomain}`;
+  const repoName = sanitizeHostnamePart(result.app_name || result.repo_name || repoDomain.split(".")[0] || "app");
+  const rootDomain = repoDomain.split(".").slice(1).join(".");
+  return rootDomain ? `${componentName}-${repoName}.${rootDomain}` : `${componentName}-${repoName}`;
 }
 
 function sanitizeHostnamePart(value: string): string {
@@ -757,7 +769,7 @@ function isManagedDependency(service: { type: ServiceType | string }): service i
 const autoEnvByDependency: Record<ManagedDependencyKind, string[]> = {
   postgres: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"],
   mysql: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MYSQL_URL", "MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_PASSWORD", "MYSQL_USER"],
-  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
+  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
   redis: ["REDIS_URL", "REDIS_HOST"],
   rabbitmq: ["RABBITMQ_URL", "AMQP_URL"],
 };

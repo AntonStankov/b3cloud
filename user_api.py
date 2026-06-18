@@ -183,7 +183,7 @@ class UserApi:
         component_name = sanitize_name(component.name or Path(component.path).name or "app")
         app_name = sanitize_name(f"{defaults['app_name']}-{component_name}") if multi_component else defaults["app_name"]
         namespace = defaults["namespace"]
-        component_domain = f"{component_name}.{defaults['domain']}" if multi_component else defaults["domain"]
+        component_domain = f"{component_name}-{defaults['app_name']}.{self.cluster_domain}" if multi_component else defaults["domain"]
         return {
             "repo_name": defaults["repo_name"],
             "component_name": component_name,
@@ -625,7 +625,11 @@ def _deploy_component(
     reserved_managed_env = _managed_env_names_for_services(
         service.type for service in service_requirements if service.provision
     )
-    combined_user_env = {**payload.env, **component.env}
+    combined_user_env = {
+        key.strip(): value
+        for key, value in {**payload.env, **component.env}.items()
+        if key.strip() and str(value).strip() != ""
+    }
     ignored_managed_env = sorted(key for key in combined_user_env if key in reserved_managed_env)
     if ignored_managed_env:
         svc.jobs.append_log(
@@ -716,6 +720,7 @@ def _managed_env_names_for_services(service_types: Iterable[str]) -> set[str]:
             "DB_PORT",
             "DB_USER",
             "MONGODB_URI",
+            "MONGO_URI",
             "MONGO_URL",
             "MONGODB_HOST",
             "MONGODB_DATABASE",

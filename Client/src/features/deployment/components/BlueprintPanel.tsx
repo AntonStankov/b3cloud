@@ -27,7 +27,7 @@ const dependencyLabels: Record<ManagedDependencyKind, string> = {
 const externalEnvByDependency: Record<ManagedDependencyKind, string[]> = {
   postgres: ["DATABASE_URL"],
   mysql: ["DATABASE_URL"],
-  mongodb: ["MONGODB_URI"],
+  mongodb: ["MONGO_URI"],
   redis: ["REDIS_URL"],
   rabbitmq: ["RABBITMQ_URL"],
 };
@@ -347,7 +347,7 @@ function shouldShowAutoEnv(item: AutoEnvVar, provisionedDependencies: ServiceDep
 const autoEnvByDependency: Record<ManagedDependencyKind, string[]> = {
   postgres: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PASSWORD", "POSTGRES_USER"],
   mysql: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MYSQL_URL", "MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_PASSWORD", "MYSQL_USER"],
-  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
+  mongodb: ["DATABASE_URL", "DB_HOST", "DB_NAME", "DB_PASSWORD", "DB_PORT", "DB_USER", "MONGODB_URI", "MONGO_URI", "MONGO_URL", "MONGODB_HOST", "MONGODB_DATABASE", "MONGODB_PASSWORD", "MONGODB_USER", "MONGO_INITDB_DATABASE", "MONGO_INITDB_ROOT_PASSWORD", "MONGO_INITDB_ROOT_USERNAME"],
   redis: ["REDIS_URL", "REDIS_HOST"],
   rabbitmq: ["RABBITMQ_URL", "AMQP_URL", "RABBITMQ_HOST"],
 };

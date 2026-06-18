@@ -48,6 +48,7 @@ export interface EnvVarPair {
   key: string;
   value: string;
   secret: boolean;
+  required?: boolean;
   source?: string;
   evidence?: string[];
 }
