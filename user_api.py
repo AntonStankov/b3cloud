@@ -520,18 +520,31 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             for component in components
         ]
         same_origin_public = False
-        communication_env = _component_communication_env(
-            component_defaults_list,
-            app_domain=defaults["domain"] if same_origin_public else None,
-        )
+        component_communications = _detect_deploy_component_communications(job_id, payload, components)
+        frontend_api_targets = _frontend_api_targets(component_defaults_list, component_communications)
+        communication_env_by_path = {
+            item["component_path"]: _component_communication_env(
+                component_defaults_list,
+                app_domain=defaults["domain"] if same_origin_public else None,
+                source_defaults=item,
+                frontend_api_targets=frontend_api_targets,
+            )
+            for item in component_defaults_list
+        }
         for component in components:
             component_defaults = svc.component_defaults(defaults, component, multi_component)
             if same_origin_public:
                 component_defaults["deploy_public"] = False
             svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
-            result = _deploy_component(job_id, payload, component, component_defaults, communication_env)
+            result = _deploy_component(
+                job_id,
+                payload,
+                component,
+                component_defaults,
+                communication_env_by_path.get(component_defaults["component_path"], {}),
+            )
             results.append(result)
-        frontend_api_routes = _ensure_frontend_api_routes(job_id, component_defaults_list)
+        frontend_api_routes = _ensure_frontend_api_routes(job_id, component_defaults_list, frontend_api_targets)
         shared_route = None
         if same_origin_public:
             shared_route = _ensure_same_origin_public_route(job_id, defaults, component_defaults_list)
@@ -804,28 +817,35 @@ def _latest_autoscaling_config(namespace: str, app_name: str) -> AutoscalingConf
 def _component_communication_env(
     component_defaults_list: List[Dict[str, str]],
     app_domain: Optional[str] = None,
+    source_defaults: Optional[Dict[str, str]] = None,
+    frontend_api_targets: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, str]:
     env: Dict[str, str] = {}
     index: Dict[str, Dict[str, str]] = {}
     backend_alias_set = False
     app_public_url = f"https://{app_domain}" if app_domain else ""
     primary_backend = _primary_backend_component(component_defaults_list)
+    source_is_frontend = bool(source_defaults and source_defaults.get("component_type") == "frontend")
+    same_domain_backend = frontend_api_targets.get(source_defaults["app_name"]) if source_defaults and frontend_api_targets else None
+    same_domain_api_prefix = _frontend_api_prefix(source_defaults) if source_is_frontend and same_domain_backend else ""
     for defaults in component_defaults_list:
         key = _env_key(defaults["component_name"])
         internal_url = f"http://{defaults['app_name']}.{defaults['namespace']}.svc.cluster.local"
         public_url = _component_public_url(defaults, app_public_url, primary_backend)
-        default_url = public_url or internal_url
+        is_same_domain_backend = bool(same_domain_backend and defaults.get("app_name") == same_domain_backend.get("app_name"))
+        default_url = same_domain_api_prefix if is_same_domain_backend else (public_url or internal_url)
         index[key] = {
             "component": defaults["component_name"],
             "app_name": defaults["app_name"],
             "internal_url": internal_url,
             "public_url": public_url,
+            "frontend_api_path": same_domain_api_prefix if is_same_domain_backend else "",
         }
         env[f"{key}_INTERNAL_URL"] = internal_url
         env[f"{key}_URL"] = default_url
         if public_url:
             env[f"{key}_PUBLIC_URL"] = public_url
-            env[f"VITE_{key}_URL"] = public_url
+            env[f"VITE_{key}_URL"] = default_url if source_is_frontend else public_url
 
         is_backend_alias = (
             defaults.get("component_type") == "backend"
@@ -835,13 +855,14 @@ def _component_communication_env(
             or key.endswith("_BACKEND")
         )
         if is_backend_alias and not backend_alias_set:
-            env["BACKEND_URL"] = internal_url
-            env["API_URL"] = internal_url
+            backend_default_url = same_domain_api_prefix if is_same_domain_backend else internal_url
+            env["BACKEND_URL"] = backend_default_url
+            env["API_URL"] = backend_default_url
             if public_url:
                 env["BACKEND_PUBLIC_URL"] = public_url
                 env["API_PUBLIC_URL"] = public_url
-                env["VITE_BACKEND_URL"] = "" if app_public_url else public_url
-                env["VITE_API_URL"] = "" if app_public_url else public_url
+                env["VITE_BACKEND_URL"] = same_domain_api_prefix if is_same_domain_backend else ("" if app_public_url else public_url)
+                env["VITE_API_URL"] = same_domain_api_prefix if is_same_domain_backend else ("" if app_public_url else public_url)
                 if app_public_url:
                     env["CORS_ORIGIN"] = app_public_url
                     env["APP_PUBLIC_URL"] = app_public_url
@@ -867,27 +888,79 @@ def _first_public_result_url(results: List[Dict[str, object]]) -> str:
     return ""
 
 
-def _ensure_frontend_api_routes(job_id: str, component_defaults_list: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def _detect_deploy_component_communications(
+    job_id: str,
+    payload: AppDeployIn,
+    components: List[ComponentDeployIn],
+) -> List[Dict[str, object]]:
+    if len(components) < 2:
+        return []
+    try:
+        svc.jobs.append_log(job_id, "Analyzing component communication paths for automatic routing.")
+        analysis = svc.core.analyze_repository(
+            payload.github_url,
+            git_revision=payload.git_revision,
+            github_token=payload.github_token,
+            status_callback=lambda message: svc.jobs.append_log(job_id, message),
+        )
+        communications = analysis.get("communications", [])
+        if isinstance(communications, list):
+            return [item for item in communications if isinstance(item, dict)]
+    except Exception as exc:
+        svc.jobs.append_log(job_id, f"Communication analysis skipped; falling back to primary backend routing: {exc}")
+    return []
+
+
+def _frontend_api_targets(
+    component_defaults_list: List[Dict[str, str]],
+    communications: List[Dict[str, object]],
+) -> Dict[str, Dict[str, str]]:
+    by_path = {item["component_path"]: item for item in component_defaults_list}
+    primary_backend = _primary_backend_component(component_defaults_list)
+    targets: Dict[str, Dict[str, str]] = {}
+
+    for link in sorted(communications, key=lambda item: 0 if item.get("confidence") == "high" else 1):
+        source = by_path.get(str(link.get("source_path") or ""))
+        target = by_path.get(str(link.get("target_path") or ""))
+        if not source or not target:
+            continue
+        if source.get("component_type") == "frontend" and target.get("component_type") == "backend":
+            targets.setdefault(source["app_name"], target)
+
+    if primary_backend:
+        for frontend in component_defaults_list:
+            if frontend.get("component_type") == "frontend" and frontend.get("public"):
+                targets.setdefault(frontend["app_name"], primary_backend)
+    return targets
+
+
+def _ensure_frontend_api_routes(
+    job_id: str,
+    component_defaults_list: List[Dict[str, str]],
+    frontend_api_targets: Optional[Dict[str, Dict[str, str]]] = None,
+) -> List[Dict[str, str]]:
     backend = _primary_backend_component(component_defaults_list)
     if not backend:
         return []
 
+    targets = frontend_api_targets or {}
     configured_routes: List[Dict[str, str]] = []
     for frontend in component_defaults_list:
         if frontend.get("component_type") != "frontend" or not frontend.get("public"):
             continue
-        api_prefix = _normalize_api_path_prefix(str(frontend.get("api_path_prefix") or ""))
+        target_backend = targets.get(frontend["app_name"], backend)
+        api_prefix = _frontend_api_prefix(frontend)
         if not api_prefix:
             continue
 
         routes = [
-            {"path": api_prefix, "service_name": backend["app_name"]},
+            {"path": api_prefix, "service_name": target_backend["app_name"]},
             {"path": "/", "service_name": frontend["app_name"]},
         ]
         host = str(frontend["domain"])
         svc.jobs.append_log(
             job_id,
-            f"Creating frontend API proxy https://{host}{api_prefix} -> {backend['app_name']}.",
+            f"Creating frontend API proxy https://{host}{api_prefix} -> {target_backend['app_name']}.",
         )
         svc.core.create_or_update_shared_public_route(
             str(frontend["namespace"]),
@@ -897,6 +970,13 @@ def _ensure_frontend_api_routes(job_id: str, component_defaults_list: List[Dict[
         )
         configured_routes.extend({"host": host, **route} for route in routes)
     return configured_routes
+
+
+def _frontend_api_prefix(frontend_defaults: Optional[Dict[str, str]]) -> str:
+    raw = str((frontend_defaults or {}).get("api_path_prefix") or "").strip()
+    if raw.lower() in {"off", "none", "disabled", "false"}:
+        return ""
+    return _normalize_api_path_prefix(raw or "/api")
 
 
 def _normalize_api_path_prefix(value: str) -> str:

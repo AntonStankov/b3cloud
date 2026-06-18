@@ -258,7 +258,7 @@ function DeploymentExperience() {
           path: service.path,
           type: service.kind === "react" || service.kind === "nextjs" || service.kind === "static" ? "frontend" : "backend",
           public: service.publicEndpoint,
-          api_path_prefix: service.apiPathPrefix || "",
+          api_path_prefix: service.apiPathPrefix ?? undefined,
           port: service.port ?? 8080,
           auto_detect_services: true,
           provision_services: service.dependencies.filter((dependency) => dependency.provision).map((dependency) => dependency.type),

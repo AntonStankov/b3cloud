@@ -98,7 +98,7 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
                 <h3 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-white">{service.publicEndpoint ? "Publicly accessible" : "Internal only"}</h3>
                 <p className="mt-1 text-sm leading-6 text-white/45">
                   {service.publicEndpoint && service.publicHost
-                    ? `This frontend will be routed at ${service.publicHost}.`
+                    ? `This frontend will be routed at ${service.publicHost}. API traffic is detected and proxied automatically.`
                     : "Disable this when the frontend should only be reachable by other services."}
                 </p>
               </div>
@@ -117,15 +117,15 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
             </div>
             {service.publicEndpoint && (
               <label className="mt-4 block">
-                <span className="mb-2 block text-sm font-medium text-white/60">Same-domain API path</span>
+                <span className="mb-2 block text-sm font-medium text-white/60">Automatic same-domain API path</span>
                 <input
                   value={service.apiPathPrefix ?? "/api"}
                   onChange={(event) => onChange(service.id, { apiPathPrefix: event.target.value })}
-                  placeholder="/api, or empty to disable"
+                  placeholder="/api"
                   className="w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 font-mono text-sm text-white outline-none"
                 />
                 <span className="mt-2 block text-xs leading-5 text-white/35">
-                  Requests like <span className="font-mono text-cyan-100/60">{service.apiPathPrefix || "/api"}/...</span> on this frontend domain will route to the primary backend.
+                  By default, requests like <span className="font-mono text-cyan-100/60">{service.apiPathPrefix || "/api"}/...</span> on this frontend domain route to the detected backend. Use <span className="font-mono text-cyan-100/60">off</span> only for advanced cases.
                 </span>
               </label>
             )}
