@@ -183,6 +183,7 @@ class UserApi:
         component_name = sanitize_name(component.name or Path(component.path).name or "app")
         app_name = sanitize_name(f"{defaults['app_name']}-{component_name}") if multi_component else defaults["app_name"]
         namespace = defaults["namespace"]
+        component_domain = f"{component_name}.{defaults['domain']}" if multi_component else defaults["domain"]
         return {
             "repo_name": defaults["repo_name"],
             "component_name": component_name,
@@ -192,7 +193,7 @@ class UserApi:
             "app_name": app_name,
             "namespace": namespace,
             "app_domain": defaults["domain"],
-            "domain": f"{app_name}.{self.cluster_domain}",
+            "domain": component_domain,
             "registry_repo": defaults["registry_repo"],
         }
 
@@ -516,7 +517,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             svc.component_defaults(defaults, component, multi_component)
             for component in components
         ]
-        same_origin_public = multi_component and _has_public_frontend_backend_pair(component_defaults_list)
+        same_origin_public = False
         communication_env = _component_communication_env(
             component_defaults_list,
             app_domain=defaults["domain"] if same_origin_public else None,
@@ -548,7 +549,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
                 "repo_name": defaults["repo_name"],
                 "namespace": defaults["namespace"],
                 "status": "deployed",
-                "url": shared_route["url"] if shared_route else "",
+                "url": shared_route["url"] if shared_route else _first_public_result_url(results),
                 "routes": shared_route["routes"] if shared_route else [],
                 "components": results,
             },
@@ -842,9 +843,20 @@ def _component_communication_env(
     return env
 
 
-def _has_public_frontend_backend_pair(component_defaults_list: List[Dict[str, str]]) -> bool:
-    has_frontend = any(item.get("public") and item.get("component_type") == "frontend" for item in component_defaults_list)
-    return has_frontend and _primary_backend_component(component_defaults_list) is not None
+def _should_create_same_origin_public_route(component_defaults_list: List[Dict[str, str]]) -> bool:
+    public_frontends = [
+        item for item in component_defaults_list
+        if item.get("public") and item.get("component_type") == "frontend"
+    ]
+    return len(public_frontends) == 1 and _primary_backend_component(component_defaults_list) is not None
+
+
+def _first_public_result_url(results: List[Dict[str, object]]) -> str:
+    for result in results:
+        url = result.get("url")
+        if isinstance(url, str) and url:
+            return url
+    return ""
 
 
 def _primary_backend_component(component_defaults_list: List[Dict[str, str]]) -> Optional[Dict[str, str]]:

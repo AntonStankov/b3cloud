@@ -10,6 +10,7 @@ interface EnvVarInputProps {
 export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInputProps) {
   const [bulkOpen, setBulkOpen] = useState(false);
   const [ignoredKeys, setIgnoredKeys] = useState<string[]>([]);
+  const [importedKeys, setImportedKeys] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bulkValue = useMemo(() => values.map((item) => `${item.key}=${item.value}`).join("\n"), [values]);
   const reservedKeySet = useMemo(() => new Set(reservedKeys.map((key) => key.trim().toUpperCase()).filter(Boolean)), [reservedKeys]);
@@ -35,9 +36,17 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
         ignored.push(item.key);
         return false;
       })
-      .map((item) => ({ id: crypto.randomUUID(), key: item.key, value: item.value, secret: true }));
+      .map((item) => ({
+        id: crypto.randomUUID(),
+        key: item.key,
+        value: item.value,
+        secret: true,
+        source: "imported .env file",
+        evidence: ["Imported by the user. You can edit or remove this value before deployment."],
+      }));
 
     setIgnoredKeys([...new Set(ignored)]);
+    setImportedKeys(imported.map((item) => item.key));
     if (mode === "replace") {
       onChange(imported);
       return;
@@ -97,6 +106,12 @@ export function EnvVarInput({ values, onChange, reservedKeys = [] }: EnvVarInput
         <div className="mb-4 rounded-2xl border border-cyan-300/10 bg-cyan-300/[0.035] p-3 text-xs leading-5 text-cyan-100/75">
           Ignored platform-managed variables from import because b3cloud will inject them at runtime:
           <span className="ml-1 font-mono">{ignoredKeys.join(", ")}</span>
+        </div>
+      )}
+      {importedKeys.length > 0 && (
+        <div className="mb-4 rounded-2xl border border-emerald-300/10 bg-emerald-300/[0.035] p-3 text-xs leading-5 text-emerald-100/75">
+          Imported editable variables:
+          <span className="ml-1 font-mono">{importedKeys.join(", ")}</span>
         </div>
       )}
       <div className="space-y-2">

@@ -247,7 +247,7 @@ function DeploymentExperience() {
           name: service.name,
           path: service.path,
           type: service.kind === "react" || service.kind === "nextjs" || service.kind === "static" ? "frontend" : "backend",
-          public: true,
+          public: service.publicEndpoint,
           port: service.port ?? 8080,
           auto_detect_services: true,
           provision_services: service.dependencies.filter((dependency) => dependency.provision).map((dependency) => dependency.type),
@@ -685,6 +685,8 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     id: `${component.path}-${component.name}`,
     name: weakGenericName ? result.app_name || result.repo_name || component.name : component.name,
     deploy: true,
+    publicEndpoint: component.public,
+    publicHost: component.public ? componentPublicHost(component, result) : "",
     kind: inferKind(component),
     path: component.path,
     port: component.port,
@@ -705,6 +707,24 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     communicationEnv: [],
     warnings: component.warnings || [],
   };
+}
+
+function componentPublicHost(component: AnalyzedComponent, result: AnalyzeResult): string {
+  const repoDomain = result.domain || "";
+  if (!repoDomain) return "";
+  if (component.path === "." || !result.components || result.components.length <= 1) {
+    return repoDomain;
+  }
+  const componentName = sanitizeHostnamePart(component.name || component.path.split("/").filter(Boolean).pop() || "app");
+  return `${componentName}.${repoDomain}`;
+}
+
+function sanitizeHostnamePart(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40) || "app";
 }
 
 function mergeAutoEnv(current: AutoEnvVar[], next: AutoEnvVar[]): AutoEnvVar[] {
@@ -810,6 +830,11 @@ function deploymentStep(status: DeploymentStatus): number {
 function deploymentUrl(job: DeployJob | null): string {
   const resultUrl = typeof job?.result?.url === "string" ? job.result.url : "";
   if (resultUrl) return resultUrl;
+  const components = Array.isArray(job?.result?.components) ? job.result.components : [];
+  const componentUrl = components
+    .map((component) => (component && typeof component === "object" && "url" in component ? component.url : ""))
+    .find((url): url is string => typeof url === "string" && Boolean(url));
+  if (componentUrl) return componentUrl;
   return job?.domain ? `https://${job.domain}` : "";
 }
 
