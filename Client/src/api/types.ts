@@ -30,6 +30,7 @@ export interface AnalyzedComponent {
   path: string;
   type: ComponentType;
   public: boolean;
+  api_path_prefix?: string;
   port: number;
   port_confidence: string;
   port_evidence: string[];

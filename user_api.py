@@ -51,6 +51,7 @@ class ComponentDeployIn(BaseModel):
     path: str = "."
     type: str = "backend"
     public: bool = True
+    api_path_prefix: str = "/api"
     port: int = 8080
     auto_detect_services: bool = True
     provision_services: List[str] = Field(default_factory=list)
@@ -190,6 +191,7 @@ class UserApi:
             "component_path": component.path,
             "component_type": component.type,
             "public": component.public,
+            "api_path_prefix": component.api_path_prefix,
             "app_name": app_name,
             "namespace": namespace,
             "app_domain": defaults["domain"],
@@ -529,6 +531,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
             result = _deploy_component(job_id, payload, component, component_defaults, communication_env)
             results.append(result)
+        frontend_api_routes = _ensure_frontend_api_routes(job_id, component_defaults_list)
         shared_route = None
         if same_origin_public:
             shared_route = _ensure_same_origin_public_route(job_id, defaults, component_defaults_list)
@@ -550,7 +553,7 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
                 "namespace": defaults["namespace"],
                 "status": "deployed",
                 "url": shared_route["url"] if shared_route else _first_public_result_url(results),
-                "routes": shared_route["routes"] if shared_route else [],
+                "routes": shared_route["routes"] if shared_route else frontend_api_routes,
                 "components": results,
             },
         )
@@ -862,6 +865,47 @@ def _first_public_result_url(results: List[Dict[str, object]]) -> str:
         if isinstance(url, str) and url:
             return url
     return ""
+
+
+def _ensure_frontend_api_routes(job_id: str, component_defaults_list: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    backend = _primary_backend_component(component_defaults_list)
+    if not backend:
+        return []
+
+    configured_routes: List[Dict[str, str]] = []
+    for frontend in component_defaults_list:
+        if frontend.get("component_type") != "frontend" or not frontend.get("public"):
+            continue
+        api_prefix = _normalize_api_path_prefix(str(frontend.get("api_path_prefix") or ""))
+        if not api_prefix:
+            continue
+
+        routes = [
+            {"path": api_prefix, "service_name": backend["app_name"]},
+            {"path": "/", "service_name": frontend["app_name"]},
+        ]
+        host = str(frontend["domain"])
+        svc.jobs.append_log(
+            job_id,
+            f"Creating frontend API proxy https://{host}{api_prefix} -> {backend['app_name']}.",
+        )
+        svc.core.create_or_update_shared_public_route(
+            str(frontend["namespace"]),
+            str(frontend["app_name"]),
+            host,
+            routes,
+        )
+        configured_routes.extend({"host": host, **route} for route in routes)
+    return configured_routes
+
+
+def _normalize_api_path_prefix(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    return cleaned.rstrip("/") or "/"
 
 
 def _primary_backend_component(component_defaults_list: List[Dict[str, str]]) -> Optional[Dict[str, str]]:

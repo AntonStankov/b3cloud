@@ -84,6 +84,7 @@ export interface DetectedService {
   deploy: boolean;
   publicEndpoint: boolean;
   publicHost?: string;
+  apiPathPrefix?: string;
   kind: ServiceKind;
   path: string;
   port?: number;

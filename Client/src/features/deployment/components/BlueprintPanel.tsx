@@ -115,6 +115,20 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
                 {service.publicEndpoint ? "Domain on" : "Domain off"}
               </button>
             </div>
+            {service.publicEndpoint && (
+              <label className="mt-4 block">
+                <span className="mb-2 block text-sm font-medium text-white/60">Same-domain API path</span>
+                <input
+                  value={service.apiPathPrefix ?? "/api"}
+                  onChange={(event) => onChange(service.id, { apiPathPrefix: event.target.value })}
+                  placeholder="/api, or empty to disable"
+                  className="w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 font-mono text-sm text-white outline-none"
+                />
+                <span className="mt-2 block text-xs leading-5 text-white/35">
+                  Requests like <span className="font-mono text-cyan-100/60">{service.apiPathPrefix || "/api"}/...</span> on this frontend domain will route to the primary backend.
+                </span>
+              </label>
+            )}
           </div>
         )}
         <label className="block">
