@@ -595,6 +595,7 @@ class PlatformCore:
             self._emit_status(status_callback, f"Using app path: {app_dir}.")
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
+            self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -2334,6 +2335,57 @@ class PlatformCore:
         if major < 8 or major > 25:
             return ""
         return str(major)
+
+    @staticmethod
+    def _prepare_maven_wrapper(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        pom_xml = app_dir / "pom.xml"
+        mvnw = app_dir / "mvnw"
+        if not pom_xml.exists() or not mvnw.exists():
+            return
+
+        wrapper_dir = app_dir / ".mvn" / "wrapper"
+        properties = wrapper_dir / "maven-wrapper.properties"
+        jar = wrapper_dir / "maven-wrapper.jar"
+        if properties.exists() and (jar.exists() or PlatformCore._maven_wrapper_can_download_jar(properties)):
+            return
+
+        disabled = app_dir / "mvnw.b3cloud-disabled"
+        try:
+            if disabled.exists():
+                disabled.unlink()
+            mvnw.rename(disabled)
+            mvnw_cmd = app_dir / "mvnw.cmd"
+            if mvnw_cmd.exists():
+                mvnw_cmd.rename(app_dir / "mvnw.cmd.b3cloud-disabled")
+        except OSError as exc:
+            PlatformCore._emit_status(
+                status_callback,
+                f"Detected an incomplete Maven wrapper, but could not disable it automatically: {exc}",
+            )
+            return
+
+        missing = []
+        if not properties.exists():
+            missing.append(".mvn/wrapper/maven-wrapper.properties")
+        if not jar.exists():
+            missing.append(".mvn/wrapper/maven-wrapper.jar")
+        PlatformCore._emit_status(
+            status_callback,
+            "Detected an incomplete Maven wrapper"
+            + (f" missing {', '.join(missing)}" if missing else "")
+            + "; disabled mvnw in the temporary build context so Paketo can use its bundled Maven.",
+        )
+
+    @staticmethod
+    def _maven_wrapper_can_download_jar(properties: Path) -> bool:
+        try:
+            content = properties.read_text(errors="ignore")
+        except OSError:
+            return False
+        return "wrapperUrl" in content
 
     @staticmethod
     def _prepare_static_frontend_build(
