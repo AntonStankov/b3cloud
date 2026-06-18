@@ -53,7 +53,7 @@ Required GitHub repository secrets:
 - `CLOUDFLARE_TUNNEL_ID`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-Use `api_ssh_domain` from `terraform.tfvars` for `B3_API_HOST`. This hostname must be an unproxied Cloudflare `A` record because GitHub Actions uses it for SSH, not browser traffic.
+Use `api_ssh_domain` from `terraform.tfvars` for `B3_API_HOST`. This hostname must be an unproxied Cloudflare `A` record because GitHub Actions uses it for SSH, not browser traffic. Browser-facing API hostnames such as `B3_USER_DOMAIN` and `B3_ADMIN_DOMAIN` are proxied through Cloudflare and should be accessed with HTTPS.
 
 Deployed tenant applications are intentionally not Terraform resources. They are created by the user API and should be redeployed through the user UI/API after a cluster rebuild.
 

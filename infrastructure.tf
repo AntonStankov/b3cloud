@@ -198,13 +198,13 @@ variable "api_server_type" {
 variable "admin_api_domain" {
   type        = string
   default     = ""
-  description = "Optional FQDN for admin API (for Cloudflare A record)."
+  description = "Optional FQDN for admin API. Browser traffic is served through a proxied Cloudflare A record."
 }
 
 variable "user_api_domain" {
   type        = string
   default     = ""
-  description = "Optional FQDN for user API (for Cloudflare A record)."
+  description = "Optional FQDN for user API. Browser traffic is served through a proxied Cloudflare A record."
 }
 
 variable "api_ssh_domain" {
@@ -735,7 +735,7 @@ resource "cloudflare_record" "admin_api_a" {
   name    = trimsuffix(var.admin_api_domain, ".${var.cluster_domain}")
   type    = "A"
   value   = hcloud_server.admin_api[0].ipv4_address
-  proxied = false
+  proxied = true
   ttl     = 1
 }
 
@@ -745,7 +745,7 @@ resource "cloudflare_record" "user_api_a" {
   name    = trimsuffix(var.user_api_domain, ".${var.cluster_domain}")
   type    = "A"
   value   = hcloud_server.admin_api[0].ipv4_address
-  proxied = false
+  proxied = true
   ttl     = 1
 }
 
@@ -761,12 +761,12 @@ resource "cloudflare_record" "api_ssh_a" {
 
 output "admin_api_access" {
   value = var.deploy_separate_api_projects ? (
-    var.admin_api_domain != "" ? "http://${var.admin_api_domain}:9000" : "http://${hcloud_server.admin_api[0].ipv4_address}:9000"
+    var.admin_api_domain != "" ? "https://${var.admin_api_domain}" : "http://${hcloud_server.admin_api[0].ipv4_address}:9000"
   ) : ""
 }
 
 output "user_api_access" {
   value = var.deploy_separate_api_projects ? (
-    var.user_api_domain != "" ? "http://${var.user_api_domain}:9001" : "http://${hcloud_server.admin_api[0].ipv4_address}:9001"
+    var.user_api_domain != "" ? "https://${var.user_api_domain}" : "http://${hcloud_server.admin_api[0].ipv4_address}:9001"
   ) : ""
 }

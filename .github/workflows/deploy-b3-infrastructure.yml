@@ -156,6 +156,6 @@ jobs:
             curl -fsS --max-time 10 "$@" "$url"
           }
 
-          retry_curl "http://$USER_DOMAIN/health" | grep -q '"status":"ok"'
-          retry_curl "http://$legacy_domain/health" | grep -q '"status":"ok"'
-          retry_curl "http://$ADMIN_DOMAIN/health" -H "X-Admin-Token: $ADMIN_TOKEN" | grep -q '"status":"ok"'
+          retry_curl "https://$USER_DOMAIN/health" | grep -q '"status":"ok"'
+          retry_curl "https://$legacy_domain/health" | grep -q '"status":"ok"'
+          retry_curl "https://$ADMIN_DOMAIN/health" -H "X-Admin-Token: $ADMIN_TOKEN" | grep -q '"status":"ok"'

@@ -91,7 +91,7 @@ def upsert_proxied_a(hostname: str, ip_address: str) -> None:
         "type": "A",
         "name": hostname,
         "content": ip_address,
-        "proxied": False,
+        "proxied": True,
         "ttl": 1,
     }
     call("POST", f"/zones/{zone_id}/dns_records", payload)
