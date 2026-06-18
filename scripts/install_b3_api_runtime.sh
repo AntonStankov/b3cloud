@@ -137,16 +137,16 @@ WantedBy=multi-user.target
 EOF
 
 cat > /etc/caddy/Caddyfile <<EOF
-http://$ADMIN_DOMAIN {
+$ADMIN_DOMAIN {
   redir / /admin 308
   reverse_proxy 127.0.0.1:9000
 }
 
-http://$LEGACY_USER_DOMAIN {
+$LEGACY_USER_DOMAIN {
   reverse_proxy 127.0.0.1:9001
 }
 
-http://$USER_DOMAIN {
+$USER_DOMAIN {
   handle /api/v1* {
     reverse_proxy 127.0.0.1:9001
   }
