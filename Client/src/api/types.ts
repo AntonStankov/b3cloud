@@ -100,6 +100,7 @@ export interface ComponentDeployInput {
 export interface DeployInput {
   github_url: string;
   github_token?: string;
+  ci_cd_enabled?: boolean;
   git_revision: string;
   port: number;
   node_arch: string | null;

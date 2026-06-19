@@ -63,6 +63,7 @@ class ComponentDeployIn(BaseModel):
 class AppDeployIn(BaseModel):
     github_url: str
     github_token: Optional[str] = None
+    ci_cd_enabled: bool = True
     env: Dict[str, str] = Field(default_factory=dict)
     git_revision: str = "main"
     port: int = 8080
@@ -125,6 +126,8 @@ class UserApi:
         self.supabase_url = os.getenv("B3CLOUD_SUPABASE_URL", "").rstrip("/")
         self.supabase_anon_key = os.getenv("B3CLOUD_SUPABASE_ANON_KEY", "")
         self.supabase_service_role_key = os.getenv("B3CLOUD_SUPABASE_SERVICE_ROLE_KEY", "")
+        self.public_base_url = os.getenv("B3CLOUD_PUBLIC_BASE_URL", "").rstrip("/")
+        self.github_webhook_secret = os.getenv("B3CLOUD_GITHUB_WEBHOOK_SECRET", "")
         self.jobs = DeployJobStore(self.supabase_url, self.supabase_service_role_key)
         self.accounts = AccountStore()
 
@@ -209,6 +212,21 @@ def repo_name_from_github_url(github_url: str) -> str:
     return match.group(1)
 
 
+def github_repo_full_name(github_url: str) -> str:
+    normalized = github_url.strip().rstrip("/")
+    match = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?$", normalized)
+    if not match:
+        raise ValueError(f"Unsupported GitHub URL format: {github_url}")
+    return f"{match.group(1)}/{match.group(2)}"
+
+
+def _safe_github_repo_full_name(github_url: str) -> str:
+    try:
+        return github_repo_full_name(github_url)
+    except ValueError:
+        return ""
+
+
 def _urlquote(value: str) -> str:
     return quote(value, safe="")
 
@@ -244,6 +262,8 @@ class DeployJobStore:
                 "domain": defaults["domain"],
                 "registry_repo": defaults["registry_repo"],
                 "auto_detect_services": payload.auto_detect_services,
+                "ci_cd_enabled": payload.ci_cd_enabled,
+                "github_repo": _safe_github_repo_full_name(payload.github_url),
                 "provision_services": payload.provision_services,
                 "redeploy_services": payload.redeploy_services,
                 "autoscaling": payload.autoscaling.model_dump(),
@@ -1314,6 +1334,47 @@ def v1_analyze_repo(
     return analyze_app(payload, x_api_key=svc.api_key)
 
 
+@app.post("/api/v1/github/webhook")
+async def v1_github_webhook(
+    request: Request,
+    x_hub_signature_256: str = Header(default=""),
+    x_github_event: str = Header(default=""),
+    x_github_delivery: str = Header(default=""),
+) -> Dict[str, object]:
+    raw_body = await request.body()
+    _verify_github_webhook_signature(raw_body, x_hub_signature_256)
+    if x_github_event == "ping":
+        return {"status": "ok", "event": "ping"}
+    if x_github_event != "push":
+        return {"status": "ignored", "event": x_github_event}
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid webhook JSON") from exc
+
+    ref = str(payload.get("ref") or "")
+    branch = ref.removeprefix("refs/heads/")
+    repo_payload = payload.get("repository")
+    full_name = str(repo_payload.get("full_name") or "") if isinstance(repo_payload, dict) else ""
+    if not full_name or not branch or branch == ref:
+        return {"status": "ignored", "reason": "unsupported ref or repository"}
+
+    matches = _matching_cicd_jobs(full_name, branch)
+    started = [
+        next_job
+        for job in matches
+        if (next_job := _start_cicd_redeploy(job, branch, x_github_delivery)) is not None
+    ]
+    return {
+        "status": "accepted",
+        "repository": full_name,
+        "branch": branch,
+        "matched_projects": len(matches),
+        "started_jobs": [job["job_id"] for job in started],
+    }
+
+
 @app.get("/api/v1/deployments")
 def v1_list_deployments(
     request: Request,
@@ -1728,6 +1789,139 @@ def _friendly_analysis_error(message: str) -> str:
         return "The repository requires authentication. Reconnect GitHub before analyzing private repositories."
     return f"Repository inspection failed: {message[:1200]}"
 
+
+def _github_webhook_url() -> str:
+    if svc.public_base_url:
+        return f"{svc.public_base_url}/api/v1/github/webhook"
+    user_domain = os.getenv("USER_DOMAIN", "").strip()
+    if user_domain:
+        return f"https://{user_domain}/api/v1/github/webhook"
+    return ""
+
+
+def _ensure_github_push_webhook(payload: AppDeployIn, job_id: str) -> None:
+    if not payload.ci_cd_enabled:
+        svc.jobs.append_log(job_id, "CI/CD webhook registration skipped because CI/CD is disabled for this deployment.")
+        return
+    if not payload.github_token:
+        svc.jobs.append_log(job_id, "CI/CD webhook registration skipped because no GitHub token was provided.")
+        return
+    if not svc.github_webhook_secret:
+        svc.jobs.append_log(job_id, "CI/CD webhook registration skipped because B3CLOUD_GITHUB_WEBHOOK_SECRET is not configured.")
+        return
+    webhook_url = _github_webhook_url()
+    if not webhook_url:
+        svc.jobs.append_log(job_id, "CI/CD webhook registration skipped because B3CLOUD_PUBLIC_BASE_URL is not configured.")
+        return
+    try:
+        repo = github_repo_full_name(payload.github_url)
+        hooks = _github_api_request(f"https://api.github.com/repos/{repo}/hooks", token=payload.github_token)
+        if isinstance(hooks, list):
+            for hook in hooks:
+                if not isinstance(hook, dict):
+                    continue
+                config_payload = hook.get("config")
+                if isinstance(config_payload, dict) and config_payload.get("url") == webhook_url:
+                    svc.jobs.append_log(job_id, f"CI/CD webhook already configured for {repo}.")
+                    return
+        _github_api_request(
+            f"https://api.github.com/repos/{repo}/hooks",
+            token=payload.github_token,
+            method="POST",
+            body={
+                "name": "web",
+                "active": True,
+                "events": ["push"],
+                "config": {
+                    "url": webhook_url,
+                    "content_type": "json",
+                    "secret": svc.github_webhook_secret,
+                    "insecure_ssl": "0",
+                },
+            },
+        )
+        svc.jobs.append_log(job_id, f"CI/CD webhook configured for {repo}. Pushes to {payload.git_revision or 'default branch'} will trigger redeploys.")
+    except Exception as exc:
+        svc.jobs.append_log(job_id, f"CI/CD webhook registration failed, deployment will continue: {exc}")
+
+
+def _github_api_request(url: str, token: str, method: str = "GET", body: Optional[Dict[str, object]] = None) -> object:
+    data = None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "B3Cloud",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urlrequest.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urlrequest.urlopen(req, timeout=15) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload) if payload else {}
+    except urlerror.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GitHub API request failed: {exc.code} {detail}") from exc
+
+
+def _verify_github_webhook_signature(raw_body: bytes, signature_header: str) -> None:
+    if not svc.github_webhook_secret:
+        raise HTTPException(status_code=503, detail="GitHub webhook secret is not configured")
+    if not signature_header.startswith("sha256="):
+        raise HTTPException(status_code=401, detail="Missing GitHub webhook signature")
+    expected = "sha256=" + hmac.new(
+        svc.github_webhook_secret.encode("utf-8"),
+        raw_body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, signature_header):
+        raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
+
+
+def _matching_cicd_jobs(repo_full_name: str, branch: str) -> List[Dict[str, object]]:
+    latest_by_project: Dict[tuple[str, str], Dict[str, object]] = {}
+    for job in svc.jobs.list_jobs():
+        if not bool(job.get("ci_cd_enabled", True)):
+            continue
+        github_repo = str(job.get("github_repo") or _safe_github_repo_full_name(str(job.get("github_url") or ""))).lower()
+        if github_repo != repo_full_name.lower():
+            continue
+        config_payload = job.get("deployment_config")
+        if not isinstance(config_payload, dict):
+            continue
+        configured_branch = str(config_payload.get("git_revision") or job.get("git_revision") or "main")
+        if configured_branch and configured_branch != branch:
+            continue
+        key = (str(job.get("namespace") or ""), str(job.get("app_name") or ""))
+        if not key[0] or not key[1]:
+            continue
+        existing = latest_by_project.get(key)
+        if not existing or str(job.get("updated_at") or "") > str(existing.get("updated_at") or ""):
+            latest_by_project[key] = job
+    return list(latest_by_project.values())
+
+
+def _start_cicd_redeploy(job: Dict[str, object], branch: str, delivery_id: str) -> Optional[Dict[str, object]]:
+    config_payload = job.get("deployment_config")
+    if not isinstance(config_payload, dict):
+        return None
+    config_payload = dict(config_payload)
+    config_payload["git_revision"] = branch
+    config_payload["github_token"] = None
+    payload = AppDeployIn(**config_payload)
+    next_job = _start_deploy_job(
+        payload,
+        {"id": str(job.get("user_id") or "api-key")},
+        register_webhook=False,
+    )
+    svc.jobs.append_log(
+        str(next_job["job_id"]),
+        f"CI/CD redeploy triggered by GitHub push delivery {delivery_id or 'unknown'} on branch {branch}.",
+    )
+    return next_job
+
 @app.post("/apps/deploy")
 def deploy_app(
     payload: AppDeployIn,
@@ -1738,9 +1932,11 @@ def deploy_app(
     return _start_deploy_job(payload, user)
 
 
-def _start_deploy_job(payload: AppDeployIn, user: Dict[str, object]) -> Dict[str, object]:
+def _start_deploy_job(payload: AppDeployIn, user: Dict[str, object], register_webhook: bool = True) -> Dict[str, object]:
     defaults = svc.defaults_from_github_url(payload.github_url)
     job = svc.jobs.create_job(payload, defaults, user_id=str(user.get("id") or ""))
+    if register_webhook:
+        _ensure_github_push_webhook(payload, str(job["job_id"]))
     threading.Thread(
         target=_run_deploy_job,
         args=(job["job_id"], payload, defaults),

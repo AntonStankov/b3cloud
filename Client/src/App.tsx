@@ -148,7 +148,7 @@ function DeploymentExperience() {
     setBusy("github");
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: "github",
-      options: { scopes: "repo read:user user:email", redirectTo: window.location.origin },
+      options: { scopes: "repo admin:repo_hook read:user user:email", redirectTo: window.location.origin },
     });
     if (oauthError) {
       setError(oauthError.message);
@@ -283,6 +283,7 @@ function DeploymentExperience() {
       const job = await deploy({
         github_url: repository.url,
         github_token: githubToken || undefined,
+        ci_cd_enabled: true,
         git_revision: repository.defaultBranch || "",
         port: deployableServices[0]?.port ?? 8080,
         node_arch: "amd64",
