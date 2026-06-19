@@ -139,6 +139,80 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+cat > /usr/local/sbin/b3cloud-build-cache-cleanup <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOCK_FILE="/run/b3cloud-build-cache-cleanup.lock"
+
+log() {
+  printf '[b3cloud-build-cache-cleanup] %s\n' "$*"
+}
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another cleanup is already running; exiting"
+  exit 0
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  log "docker is not installed; exiting"
+  exit 0
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  log "docker is not reachable; exiting"
+  exit 0
+fi
+
+log "disk before cleanup: $(df -h / | awk 'NR==2 {print $4 " free of " $2 " (" $5 " used)"}')"
+docker system df || true
+
+docker container prune -f || true
+docker builder prune -af || true
+docker image prune -af || true
+
+mapfile -t pack_volumes < <(docker volume ls -q | grep -E '^(pack-cache|pack-layers|pack-app)' || true)
+if (( ${#pack_volumes[@]} > 0 )); then
+  log "removing ${#pack_volumes[@]} stale pack volume(s)"
+  docker volume rm -f "${pack_volumes[@]}" || true
+else
+  log "no stale pack volumes found"
+fi
+
+log "disk after cleanup: $(df -h / | awk 'NR==2 {print $4 " free of " $2 " (" $5 " used)"}')"
+docker system df || true
+EOF
+chmod 0755 /usr/local/sbin/b3cloud-build-cache-cleanup
+
+cat > /etc/systemd/system/b3cloud-build-cache-cleanup.service <<'EOF'
+[Unit]
+Description=B3Cloud Docker and Buildpacks cache cleanup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/b3cloud-build-cache-cleanup
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOF
+
+cat > /etc/systemd/system/b3cloud-build-cache-cleanup.timer <<'EOF'
+[Unit]
+Description=Run B3Cloud build cache cleanup daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=b3cloud-build-cache-cleanup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
 cat > /etc/caddy/Caddyfile <<EOF
 $ADMIN_DOMAIN {
   redir / /admin 308
@@ -178,6 +252,7 @@ systemctl daemon-reload
 systemctl enable --now docker
 systemctl enable --now b3-admin-api
 systemctl enable --now b3-user-api
+systemctl enable --now b3cloud-build-cache-cleanup.timer
 systemctl enable --now caddy
 systemctl restart docker
 systemctl restart b3-admin-api
