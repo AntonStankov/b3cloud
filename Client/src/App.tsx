@@ -322,6 +322,7 @@ function DeploymentExperience() {
         github_url: repository.url,
         github_token: githubToken || undefined,
         ci_cd_enabled: true,
+        ci_cd_branch: repository.defaultBranch || "",
         git_revision: repository.defaultBranch || "",
         port: deployableServices[0]?.port ?? 8080,
         node_arch: "amd64",
@@ -643,7 +644,7 @@ function ProjectsView(props: {
                   <span className="rounded-full border border-white/5 bg-[#0B0B0F]/50 px-3 py-1 font-mono text-xs uppercase tracking-[0.14em] text-cyan-100/70">{status}</span>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2 font-mono text-xs text-white/40">
-                  <span>{project.git_revision || "default branch"}</span>
+                  <span>{project.deployment_config?.ci_cd_branch || project.git_revision || "default branch"}</span>
                   {project.url && <span className="truncate text-cyan-100/60">{project.url}</span>}
                   {project.updated_at && <span>{new Date(project.updated_at).toLocaleString()}</span>}
                 </div>
@@ -681,7 +682,7 @@ function ProjectsView(props: {
 
             <div className="mb-4 grid gap-3 md:grid-cols-3">
               <InfoTile label="Repository" value={selected.github_url || "unknown"} />
-              <InfoTile label="Branch" value={selected.git_revision || "default"} />
+              <InfoTile label="Branch" value={selected.deployment_config?.ci_cd_branch || selected.git_revision || "default"} />
               <InfoTile label="Components" value={String(selected.components?.length || selected.deployment_config?.components?.length || 1)} />
             </div>
 

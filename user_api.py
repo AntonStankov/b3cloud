@@ -64,6 +64,7 @@ class AppDeployIn(BaseModel):
     github_url: str
     github_token: Optional[str] = None
     ci_cd_enabled: bool = True
+    ci_cd_branch: Optional[str] = None
     env: Dict[str, str] = Field(default_factory=dict)
     git_revision: str = "main"
     port: int = 8080
@@ -1364,16 +1365,18 @@ async def v1_github_webhook(
     if not full_name or not branch or branch == ref:
         return {"status": "ignored", "reason": "unsupported ref or repository"}
 
+    commit_sha = str(payload.get("after") or "")
     matches = _matching_cicd_jobs(full_name, branch)
     started = [
         next_job
         for job in matches
-        if (next_job := _start_cicd_redeploy(job, branch, x_github_delivery)) is not None
+        if (next_job := _start_cicd_redeploy(job, branch, commit_sha, x_github_delivery)) is not None
     ]
     return {
         "status": "accepted",
         "repository": full_name,
         "branch": branch,
+        "commit": commit_sha,
         "matched_projects": len(matches),
         "started_jobs": [job["job_id"] for job in started],
     }
@@ -1920,7 +1923,7 @@ def _matching_cicd_jobs(repo_full_name: str, branch: str) -> List[Dict[str, obje
         config_payload = job.get("deployment_config")
         if not isinstance(config_payload, dict):
             continue
-        configured_branch = str(config_payload.get("git_revision") or job.get("git_revision") or "main")
+        configured_branch = str(config_payload.get("ci_cd_branch") or config_payload.get("git_revision") or job.get("git_revision") or "main")
         if configured_branch and configured_branch != branch:
             continue
         key = (str(job.get("namespace") or ""), str(job.get("app_name") or ""))
@@ -1932,12 +1935,16 @@ def _matching_cicd_jobs(repo_full_name: str, branch: str) -> List[Dict[str, obje
     return list(latest_by_project.values())
 
 
-def _start_cicd_redeploy(job: Dict[str, object], branch: str, delivery_id: str) -> Optional[Dict[str, object]]:
+def _start_cicd_redeploy(job: Dict[str, object], branch: str, commit_sha: str, delivery_id: str) -> Optional[Dict[str, object]]:
     config_payload = job.get("deployment_config")
     if not isinstance(config_payload, dict):
         return None
     config_payload = dict(config_payload)
-    config_payload["git_revision"] = branch
+    config_payload["ci_cd_branch"] = branch
+    if commit_sha:
+        config_payload["git_revision"] = commit_sha
+    else:
+        config_payload["git_revision"] = branch
     config_payload["github_token"] = None
     payload = AppDeployIn(**config_payload)
     next_job = _start_deploy_job(
@@ -1947,7 +1954,8 @@ def _start_cicd_redeploy(job: Dict[str, object], branch: str, delivery_id: str) 
     )
     svc.jobs.append_log(
         str(next_job["job_id"]),
-        f"CI/CD redeploy triggered by GitHub push delivery {delivery_id or 'unknown'} on branch {branch}.",
+        f"CI/CD redeploy triggered by GitHub push delivery {delivery_id or 'unknown'} on branch {branch}"
+        + (f" at commit {commit_sha[:12]}." if commit_sha else "."),
     )
     return next_job
 
