@@ -56,6 +56,7 @@ function DeploymentExperience() {
   const [activeJob, setActiveJob] = useState<DeployJob | null>(null);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null);
+  const [selectedProjectJob, setSelectedProjectJob] = useState<DeployJob | null>(null);
   const [projectConfigText, setProjectConfigText] = useState("");
   const [selectedDependency, setSelectedDependency] = useState<ManagedDependencyKind | null>(null);
 
@@ -110,6 +111,27 @@ function DeploymentExperience() {
     }, 2800);
     return () => window.clearInterval(timer);
   }, [activeJob, dispatch]);
+
+  const selectedProjectId = selectedProject?.deployment_id || "";
+
+  useEffect(() => {
+    if (!selectedProjectId || state.step !== "projects") return;
+    const timer = window.setInterval(async () => {
+      try {
+        const detail = await getProject(selectedProjectId);
+        setSelectedProject(detail);
+        setProjects((current) => mergeProjectSummary(current, detail));
+        const latestJobId = detail.last_job?.job_id;
+        if (latestJobId) {
+          const latestJob = await getJob(latestJobId);
+          setSelectedProjectJob(latestJob);
+        }
+      } catch (err) {
+        setError(readError(err));
+      }
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [selectedProjectId, state.step]);
 
   function applySession(nextSession: Session | null) {
     setSession(nextSession);
@@ -186,6 +208,13 @@ function DeploymentExperience() {
     try {
       const items = await listProjects();
       setProjects(items);
+      if (selectedProject) {
+        const nextSelected = items.find((item) => item.deployment_id === selectedProject.deployment_id);
+        if (nextSelected) {
+          setSelectedProject(nextSelected);
+          setSelectedProjectJob(nextSelected.last_job || selectedProjectJob);
+        }
+      }
     } catch (err) {
       setError(readError(err));
     } finally {
@@ -199,6 +228,7 @@ function DeploymentExperience() {
     try {
       const detail = await getProject(project.deployment_id);
       setSelectedProject(detail);
+      setSelectedProjectJob(detail.last_job || null);
       setProjectConfigText(JSON.stringify(detail.deployment_config || detail.last_job?.deployment_config || {}, null, 2));
       dispatch({ type: "SET_STEP", step: "projects" });
     } catch (err) {
@@ -217,8 +247,9 @@ function DeploymentExperience() {
       if (githubToken && !parsed.github_token) parsed.github_token = githubToken;
       const job = await redeployProject(selectedProject.deployment_id, parsed);
       setActiveJob(job);
+      setSelectedProjectJob(job);
       dispatch({ type: "SET_DEPLOYMENT", deployment: { status: mapJobStatus(job.status), currentStep: deploymentStep(mapJobStatus(job.status)) } });
-      dispatch({ type: "SET_STEP", step: "ignition" });
+      await loadProjectsView();
     } catch (err) {
       setError(`Redeploy failed: ${readError(err)}`);
     } finally {
@@ -400,6 +431,7 @@ function DeploymentExperience() {
               busy={busy}
               projects={projects}
               selectedProject={selectedProject}
+              selectedProjectJob={selectedProjectJob}
               projectConfigText={projectConfigText}
               onRefresh={loadProjectsView}
               onSelectProject={openProject}
@@ -553,6 +585,7 @@ function ProjectsView(props: {
   busy: string;
   projects: ProjectSummary[];
   selectedProject: ProjectSummary | null;
+  selectedProjectJob: DeployJob | null;
   projectConfigText: string;
   onRefresh: () => void;
   onSelectProject: (project: ProjectSummary) => void;
@@ -561,6 +594,9 @@ function ProjectsView(props: {
   onNewProject: () => void;
 }) {
   const selected = props.selectedProject;
+  const projectJob = props.selectedProjectJob || selected?.last_job || null;
+  const projectEvents = projectJob ? jobToEvents(projectJob) : [];
+  const isDeploying = projectJob ? ["queued", "running", "submitting"].includes(projectJob.status) : false;
   return (
     <section className="grid grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)] gap-4 max-xl:grid-cols-1">
       <div className="rounded-[36px] border border-white/5 bg-[#12121A]/80 p-5 shadow-tactile backdrop-blur-md">
@@ -641,6 +677,26 @@ function ProjectsView(props: {
               <InfoTile label="Branch" value={selected.git_revision || "default"} />
               <InfoTile label="Components" value={String(selected.components?.length || selected.deployment_config?.components?.length || 1)} />
             </div>
+
+            {projectJob && (
+              <div className="mb-4 rounded-3xl border border-white/5 bg-white/[0.025] p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-200/60">Latest deployment job</p>
+                    <p className="mt-1 font-mono text-xs text-white/40">{projectJob.job_id}</p>
+                  </div>
+                  <span className={`rounded-full border px-3 py-1 font-mono text-xs uppercase tracking-[0.14em] ${projectJob.status === "failed" ? "border-rose-300/20 bg-rose-300/10 text-rose-100" : projectJob.status === "succeeded" ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" : "border-cyan-300/20 bg-cyan-300/10 text-cyan-100"}`}>
+                    {projectJob.status}
+                  </span>
+                </div>
+                {projectJob.logs?.some((line) => line.toLowerCase().includes("ci/cd redeploy triggered")) && (
+                  <p className="mb-3 rounded-2xl border border-cyan-300/10 bg-cyan-300/[0.06] px-4 py-3 text-sm text-cyan-100/70">
+                    This redeploy was triggered automatically by a GitHub push.
+                  </p>
+                )}
+                <LogTerminal events={projectEvents} streaming={isDeploying} />
+              </div>
+            )}
 
             <label className="block">
               <span className="mb-2 block text-sm font-medium text-white/60">Saved deployment config</span>
@@ -1010,6 +1066,14 @@ function inferFramework(component: AnalyzedComponent): string {
 
 function jobToEvents(job: DeployJob): DeploymentEvent[] {
   return (job.logs || []).map((line, index) => ({ id: `${job.job_id}-${index}`, timestamp: job.updated_at || job.created_at || new Date().toISOString(), level: line.toLowerCase().includes("failed") || line.toLowerCase().includes("error") ? "error" : "info", message: line }));
+}
+
+function mergeProjectSummary(projects: ProjectSummary[], next: ProjectSummary): ProjectSummary[] {
+  const found = projects.some((project) => project.deployment_id === next.deployment_id);
+  const merged = found
+    ? projects.map((project) => project.deployment_id === next.deployment_id ? next : project)
+    : [next, ...projects];
+  return merged.sort((a, b) => String(b.updated_at || b.last_job?.updated_at || "").localeCompare(String(a.updated_at || a.last_job?.updated_at || "")));
 }
 
 function demoEvents(status: DeploymentStatus): DeploymentEvent[] {
