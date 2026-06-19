@@ -17,7 +17,7 @@ import traceback
 import uuid
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -122,10 +122,11 @@ class UserApi:
         self.registry_username = os.getenv("B3CLOUD_REGISTRY_USERNAME", "")
         self.registry_namespace = os.getenv("B3CLOUD_REGISTRY_NAMESPACE", self.registry_username).lower()
         self.core = PlatformCore(kubeconfig=kubeconfig)
-        self.jobs = DeployJobStore()
-        self.accounts = AccountStore()
         self.supabase_url = os.getenv("B3CLOUD_SUPABASE_URL", "").rstrip("/")
         self.supabase_anon_key = os.getenv("B3CLOUD_SUPABASE_ANON_KEY", "")
+        self.supabase_service_role_key = os.getenv("B3CLOUD_SUPABASE_SERVICE_ROLE_KEY", "")
+        self.jobs = DeployJobStore(self.supabase_url, self.supabase_service_role_key)
+        self.accounts = AccountStore()
 
     def auth(self, x_api_key: Optional[str], authorization: Optional[str] = None) -> Dict[str, object]:
         if x_api_key and self.api_key and x_api_key == self.api_key:
@@ -208,26 +209,21 @@ def repo_name_from_github_url(github_url: str) -> str:
     return match.group(1)
 
 
+def _urlquote(value: str) -> str:
+    return quote(value, safe="")
+
+
 class DeployJobStore:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._jobs_path = Path(__file__).with_name("data") / "user_deploy_jobs.json"
-        self._jobs_path.parent.mkdir(parents=True, exist_ok=True)
-        self._jobs: Dict[str, Dict[str, object]] = {}
-        self._load()
+    TABLE = "b3cloud_deploy_jobs"
 
-    def _load(self) -> None:
-        if not self._jobs_path.exists():
-            return
-        try:
-            payload = json.loads(self._jobs_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            return
-        if isinstance(payload, dict):
-            self._jobs = payload
-
-    def _persist(self) -> None:
-        self._jobs_path.write_text(json.dumps(self._jobs, indent=2, sort_keys=True))
+    def __init__(self, supabase_url: str, service_role_key: str) -> None:
+        self._lock = threading.RLock()
+        self.supabase_url = supabase_url.rstrip("/")
+        self.service_role_key = service_role_key
+        if not self.supabase_url or not self.service_role_key:
+            raise RuntimeError(
+                "Server misconfigured: B3CLOUD_SUPABASE_URL and B3CLOUD_SUPABASE_SERVICE_ROLE_KEY are required for project storage"
+            )
 
     def create_job(self, payload: AppDeployIn, defaults: Dict[str, str], user_id: str = "") -> Dict[str, object]:
         with self._lock:
@@ -257,62 +253,137 @@ class DeployJobStore:
                 "result": None,
                 "error": None,
             }
-            self._jobs[job_id] = job
-            self._trim()
-            self._persist()
+            self._insert_job(job)
             return dict(job)
 
     def append_log(self, job_id: str, message: str) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._get_required_job(job_id)
             logs = list(job.get("logs", []))
             logs.append(message)
             job["logs"] = logs[-300:]
             job["updated_at"] = _now()
-            self._persist()
+            self._update_job(job_id, job)
 
     def set_status(self, job_id: str, status: str) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._get_required_job(job_id)
             job["status"] = status
             job["updated_at"] = _now()
-            self._persist()
+            self._update_job(job_id, job)
 
     def set_result(self, job_id: str, result: Dict[str, object]) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._get_required_job(job_id)
             job["result"] = result
             job["status"] = "succeeded"
             job["updated_at"] = _now()
-            self._persist()
+            self._update_job(job_id, job)
 
     def set_error(self, job_id: str, error_message: str, diagnostics: Optional[Dict[str, object]] = None) -> None:
         with self._lock:
-            job = self._jobs[job_id]
+            job = self._get_required_job(job_id)
             job["error"] = error_message
             job["status"] = "failed"
             if diagnostics:
                 job["failure_summary"] = diagnostics.get("summary") or error_message
                 job["runtime_failure"] = diagnostics
             job["updated_at"] = _now()
-            self._persist()
+            self._update_job(job_id, job)
 
     def get_job(self, job_id: str) -> Optional[Dict[str, object]]:
         with self._lock:
-            job = self._jobs.get(job_id)
-            return dict(job) if job else None
+            rows = self._request("GET", f"job_id=eq.{_urlquote(job_id)}&select=*&limit=1")
+            if not isinstance(rows, list) or not rows:
+                return None
+            return self._row_to_job(rows[0])
 
     def list_jobs(self) -> List[Dict[str, object]]:
         with self._lock:
-            jobs = [dict(job) for job in self._jobs.values()]
-        jobs.sort(key=lambda job: str(job.get("created_at", "")), reverse=True)
-        return jobs
+            rows = self._request("GET", "select=*&order=created_at.desc&limit=1000")
+            if not isinstance(rows, list):
+                return []
+            return [self._row_to_job(row) for row in rows if isinstance(row, dict)]
 
-    def _trim(self) -> None:
-        if len(self._jobs) <= 100:
-            return
-        ordered = sorted(self._jobs.items(), key=lambda item: str(item[1].get("created_at", "")), reverse=True)
-        self._jobs = dict(ordered[:100])
+    def _get_required_job(self, job_id: str) -> Dict[str, object]:
+        job = self.get_job(job_id)
+        if not job:
+            raise KeyError(f"Deploy job not found: {job_id}")
+        return job
+
+    def _insert_job(self, job: Dict[str, object]) -> None:
+        self._request(
+            "POST",
+            "select=job_id",
+            body=self._job_to_row(job),
+            prefer="return=minimal",
+        )
+
+    def _update_job(self, job_id: str, job: Dict[str, object]) -> None:
+        self._request(
+            "PATCH",
+            f"job_id=eq.{_urlquote(job_id)}",
+            body=self._job_to_row(job),
+            prefer="return=minimal",
+        )
+
+    def _job_to_row(self, job: Dict[str, object]) -> Dict[str, object]:
+        return {
+            "job_id": str(job.get("job_id") or ""),
+            "user_id": str(job.get("user_id") or ""),
+            "namespace": str(job.get("namespace") or ""),
+            "app_name": str(job.get("app_name") or ""),
+            "github_url": str(job.get("github_url") or ""),
+            "git_revision": str(job.get("git_revision") or ""),
+            "status": str(job.get("status") or ""),
+            "created_at": str(job.get("created_at") or _now()),
+            "updated_at": str(job.get("updated_at") or _now()),
+            "document": job,
+        }
+
+    @staticmethod
+    def _row_to_job(row: Dict[str, object]) -> Dict[str, object]:
+        document = row.get("document")
+        job = dict(document) if isinstance(document, dict) else {}
+        for key in ("job_id", "user_id", "namespace", "app_name", "github_url", "git_revision", "status", "created_at", "updated_at"):
+            if row.get(key) is not None:
+                job[key] = row[key]
+        job.setdefault("logs", [])
+        job.setdefault("result", None)
+        job.setdefault("error", None)
+        return job
+
+    def _request(
+        self,
+        method: str,
+        query: str,
+        body: Optional[Dict[str, object]] = None,
+        prefer: str = "",
+    ) -> object:
+        url = f"{self.supabase_url}/rest/v1/{self.TABLE}"
+        if query:
+            url = f"{url}?{query}"
+        headers = {
+            "apikey": self.service_role_key,
+            "Authorization": f"Bearer {self.service_role_key}",
+            "Accept": "application/json",
+        }
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if prefer:
+            headers["Prefer"] = prefer
+        req = urlrequest.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlrequest.urlopen(req, timeout=15) as response:
+                payload = response.read().decode("utf-8")
+                return json.loads(payload) if payload else {}
+        except urlerror.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Supabase deploy job store request failed: {exc.code} {detail}") from exc
+        except Exception as exc:
+            raise RuntimeError(f"Supabase deploy job store request failed: {exc}") from exc
 
 
 class AccountStore:
