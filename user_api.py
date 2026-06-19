@@ -98,6 +98,10 @@ class GitHubLinkIn(BaseModel):
     installation_id: Optional[str] = None
 
 
+class ProjectCicdRegisterIn(BaseModel):
+    github_token: Optional[str] = None
+
+
 class DeploymentUpdateIn(BaseModel):
     env: Optional[Dict[str, str]] = None
     git_revision: Optional[str] = None
@@ -1489,6 +1493,31 @@ def v1_redeploy_project(
     return v1_create_deployment(deploy_payload, request, x_api_key)
 
 
+@app.post("/api/v1/projects/{deployment_id}/cicd/register")
+def v1_register_project_cicd(
+    deployment_id: str,
+    payload: ProjectCicdRegisterIn,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    user = _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
+    deploy_payload = _latest_project_payload(namespace, app_name)
+    deploy_payload.github_token = payload.github_token
+    deploy_payload.ci_cd_enabled = True
+    latest_job = _latest_project_job(namespace, app_name)
+    if not latest_job:
+        raise HTTPException(status_code=404, detail="Project deployment job not found")
+    _ensure_github_push_webhook(deploy_payload, str(latest_job["job_id"]))
+    refreshed = svc.jobs.get_job(str(latest_job["job_id"])) or latest_job
+    return {
+        "deployment_id": deployment_id,
+        "status": "accepted",
+        "job": refreshed,
+    }
+
+
 @app.post("/api/v1/deployments/{deployment_id}/rollback")
 def v1_rollback(
     deployment_id: str,
@@ -2145,13 +2174,20 @@ def _require_project_access(namespace: str, app_name: str, user: Dict[str, objec
 
 
 def _latest_project_payload(namespace: str, app_name: str) -> AppDeployIn:
-    for job in svc.jobs.list_jobs():
-        if str(job.get("namespace") or "") != namespace or str(job.get("app_name") or "") != app_name:
-            continue
-        config_payload = job.get("deployment_config")
+    latest_job = _latest_project_job(namespace, app_name)
+    if latest_job:
+        config_payload = latest_job.get("deployment_config")
         if isinstance(config_payload, dict):
             return AppDeployIn(**config_payload)
     raise HTTPException(status_code=404, detail="Saved deployment config not found")
+
+
+def _latest_project_job(namespace: str, app_name: str) -> Optional[Dict[str, object]]:
+    for job in svc.jobs.list_jobs():
+        if str(job.get("namespace") or "") != namespace or str(job.get("app_name") or "") != app_name:
+            continue
+        return job
+    return None
 
 
 def _list_deployments(namespace: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, object]]:

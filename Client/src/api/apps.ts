@@ -79,6 +79,13 @@ export async function redeployProject(deploymentId: string, input: DeployInput):
   });
 }
 
+export async function registerProjectCicd(deploymentId: string, githubToken?: string): Promise<{ status: string; job?: DeployJob }> {
+  return request<{ status: string; job?: DeployJob }>(`/api/v1/projects/${encodeURIComponent(deploymentId)}/cicd/register`, {
+    method: "POST",
+    body: { github_token: githubToken || null },
+  });
+}
+
 export async function getAppStatus(
   namespace: string,
   appName: string

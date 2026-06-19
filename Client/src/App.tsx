@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { motion } from "framer-motion";
-import { analyze, deploy, getJob, getProject, health, listJobs, listProjects, redeployProject } from "./api/apps";
+import { analyze, deploy, getJob, getProject, health, listJobs, listProjects, redeployProject, registerProjectCicd } from "./api/apps";
 import { clearBearerToken, setBearerToken } from "./api/config";
 import type { AnalyzeResult, AnalyzedComponent, DeployInput, DeployJob, ProjectSummary, ServiceType } from "./api/types";
 import { ArchitectureGraph } from "./features/deployment/components/ArchitectureGraph";
@@ -230,6 +230,13 @@ function DeploymentExperience() {
       setSelectedProject(detail);
       setSelectedProjectJob(detail.last_job || null);
       setProjectConfigText(JSON.stringify(detail.deployment_config || detail.last_job?.deployment_config || {}, null, 2));
+      if (githubToken) {
+        registerProjectCicd(detail.deployment_id, githubToken)
+          .then((result) => {
+            if (result.job) setSelectedProjectJob(result.job);
+          })
+          .catch((err) => setError(`CI/CD setup failed: ${readError(err)}`));
+      }
       dispatch({ type: "SET_STEP", step: "projects" });
     } catch (err) {
       setError(readError(err));
