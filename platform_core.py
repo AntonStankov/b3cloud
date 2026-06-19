@@ -621,7 +621,17 @@ class PlatformCore:
                 cmd.extend(["--env", f"{key}={value}"])
             cmd.extend(["--env", f"PORT={req.port}"])
             self._emit_status(status_callback, f"Running Buildpacks publish to {output_image}.")
-            self._run_command(cmd, env=env, stream_callback=status_callback)
+            try:
+                self._run_command(cmd, env=env, stream_callback=status_callback)
+            except RuntimeError as exc:
+                if not self._is_disk_space_error(str(exc)):
+                    raise
+                self._emit_status(
+                    status_callback,
+                    "Build host disk is full while running Buildpacks. Cleaning stale Docker/pack build cache and retrying once.",
+                )
+                self._cleanup_build_host(env=env, status_callback=status_callback)
+                self._run_command(cmd, env=env, stream_callback=status_callback)
             self._emit_status(status_callback, f"Image published: {output_image}.")
 
         return output_image
@@ -643,6 +653,60 @@ class PlatformCore:
         self._run_command(["docker", "tag", "docker.io/library/alpine:3.20", bootstrap_tag], env=env)
         self._run_command(["docker", "push", bootstrap_tag], env=env)
         self._run_command(["docker", "rmi", bootstrap_tag], env=env)
+
+    @staticmethod
+    def _is_disk_space_error(message: str) -> bool:
+        lowered = message.lower()
+        return "no space left on device" in lowered or "disk quota exceeded" in lowered
+
+    def _cleanup_build_host(
+        self,
+        env: Dict[str, str],
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        usage = shutil.disk_usage("/")
+        self._emit_status(
+            status_callback,
+            f"Disk before cleanup: {usage.free // (1024 * 1024)} MiB free of {usage.total // (1024 * 1024)} MiB.",
+        )
+
+        cleanup_commands = [
+            ["docker", "container", "prune", "-f"],
+            ["docker", "builder", "prune", "-af"],
+            ["docker", "image", "prune", "-af"],
+        ]
+        for cmd in cleanup_commands:
+            try:
+                self._emit_status(status_callback, f"Running cleanup: {' '.join(cmd)}")
+                self._run_command(cmd, env=env)
+            except RuntimeError as exc:
+                self._emit_status(status_callback, f"Cleanup command failed but deployment will continue: {exc}")
+
+        volume_prefixes = ("pack-cache", "pack-layers", "pack-app")
+        try:
+            raw_volumes = self._run_command(["docker", "volume", "ls", "-q"], env=env)
+            volumes = [
+                volume.strip()
+                for volume in raw_volumes.splitlines()
+                if volume.strip().startswith(volume_prefixes)
+            ]
+        except RuntimeError as exc:
+            self._emit_status(status_callback, f"Could not list Docker volumes for pack cache cleanup: {exc}")
+            volumes = []
+
+        if volumes:
+            self._emit_status(status_callback, f"Removing {len(volumes)} stale pack cache volume(s).")
+            for volume in volumes:
+                try:
+                    self._run_command(["docker", "volume", "rm", "-f", volume], env=env)
+                except RuntimeError as exc:
+                    self._emit_status(status_callback, f"Could not remove Docker volume {volume}: {exc}")
+
+        usage_after = shutil.disk_usage("/")
+        self._emit_status(
+            status_callback,
+            f"Disk after cleanup: {usage_after.free // (1024 * 1024)} MiB free of {usage_after.total // (1024 * 1024)} MiB.",
+        )
 
     @staticmethod
     def _image_ref(registry_repo: str, app_name: str, tag: str) -> str:
