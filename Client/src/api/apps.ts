@@ -12,6 +12,7 @@ import type {
   AppSummary,
   DeployInput,
   DeployJob,
+  ProjectSummary,
   RuntimeLogBundle,
 } from "./types";
 
@@ -61,6 +62,21 @@ export async function health(): Promise<{ status: string }> {
 
 export async function listJobs(): Promise<DeployJob[]> {
   return request<DeployJob[]>("/deploy-jobs");
+}
+
+export async function listProjects(): Promise<ProjectSummary[]> {
+  return request<ProjectSummary[]>("/api/v1/projects");
+}
+
+export async function getProject(deploymentId: string): Promise<ProjectSummary> {
+  return request<ProjectSummary>(`/api/v1/projects/${encodeURIComponent(deploymentId)}`);
+}
+
+export async function redeployProject(deploymentId: string, input: DeployInput): Promise<DeployJob> {
+  return request<DeployJob>(`/api/v1/projects/${encodeURIComponent(deploymentId)}/redeploy`, {
+    method: "POST",
+    body: input,
+  });
 }
 
 export async function getAppStatus(

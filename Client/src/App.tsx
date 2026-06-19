@@ -1,9 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { motion } from "framer-motion";
-import { analyze, deploy, getJob, health, listJobs } from "./api/apps";
+import { analyze, deploy, getJob, getProject, health, listJobs, listProjects, redeployProject } from "./api/apps";
 import { clearBearerToken, setBearerToken } from "./api/config";
-import type { AnalyzeResult, AnalyzedComponent, DeployJob, ServiceType } from "./api/types";
+import type { AnalyzeResult, AnalyzedComponent, DeployInput, DeployJob, ProjectSummary, ServiceType } from "./api/types";
 import { ArchitectureGraph } from "./features/deployment/components/ArchitectureGraph";
 import { BlueprintPanel } from "./features/deployment/components/BlueprintPanel";
 import { LogTerminal } from "./features/deployment/components/LogTerminal";
@@ -54,6 +54,9 @@ function DeploymentExperience() {
   const [error, setError] = useState("");
   const [apiStatus, setApiStatus] = useState("checking api");
   const [activeJob, setActiveJob] = useState<DeployJob | null>(null);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [selectedProject, setSelectedProject] = useState<ProjectSummary | null>(null);
+  const [projectConfigText, setProjectConfigText] = useState("");
   const [selectedDependency, setSelectedDependency] = useState<ManagedDependencyKind | null>(null);
 
   const selectedService = useMemo(
@@ -116,7 +119,8 @@ function DeploymentExperience() {
     const providerToken = (nextSession as Session & { provider_token?: string } | null)?.provider_token || "";
     setGithubToken(providerToken);
     if (nextSession) {
-      dispatch({ type: "SET_STEP", step: state.isNewUser ? "onboarding" : "source" });
+      dispatch({ type: "SET_STEP", step: state.isNewUser ? "onboarding" : "projects" });
+      void loadProjectsView();
     }
   }
 
@@ -171,6 +175,52 @@ function DeploymentExperience() {
       dispatch({ type: "SET_REPOSITORIES", repositories: repos.map(toRepositorySummary) });
     } catch (err) {
       setError(readError(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function loadProjectsView() {
+    setBusy("projects");
+    setError("");
+    try {
+      const items = await listProjects();
+      setProjects(items);
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openProject(project: ProjectSummary) {
+    setBusy("project");
+    setError("");
+    try {
+      const detail = await getProject(project.deployment_id);
+      setSelectedProject(detail);
+      setProjectConfigText(JSON.stringify(detail.deployment_config || detail.last_job?.deployment_config || {}, null, 2));
+      dispatch({ type: "SET_STEP", step: "projects" });
+    } catch (err) {
+      setError(readError(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function redeploySelectedProject() {
+    if (!selectedProject) return;
+    setBusy("project-redeploy");
+    setError("");
+    try {
+      const parsed = JSON.parse(projectConfigText) as DeployInput;
+      if (githubToken && !parsed.github_token) parsed.github_token = githubToken;
+      const job = await redeployProject(selectedProject.deployment_id, parsed);
+      setActiveJob(job);
+      dispatch({ type: "SET_DEPLOYMENT", deployment: { status: mapJobStatus(job.status), currentStep: deploymentStep(mapJobStatus(job.status)) } });
+      dispatch({ type: "SET_STEP", step: "ignition" });
+    } catch (err) {
+      setError(`Redeploy failed: ${readError(err)}`);
     } finally {
       setBusy("");
     }
@@ -324,6 +374,7 @@ function DeploymentExperience() {
           </div>
           <nav className="space-y-2">
             {[
+              ["projects", "00", "Projects"],
               ["source", "01", "Source"],
               ["blueprint", "02", "Blueprint"],
               ["ignition", "03", "Ignition"],
@@ -343,6 +394,19 @@ function DeploymentExperience() {
 
         <main className="min-w-0">
           {state.step === "onboarding" && <OnboardingView />}
+          {state.step === "projects" && (
+            <ProjectsView
+              busy={busy}
+              projects={projects}
+              selectedProject={selectedProject}
+              projectConfigText={projectConfigText}
+              onRefresh={loadProjectsView}
+              onSelectProject={openProject}
+              onConfigChange={setProjectConfigText}
+              onRedeploy={redeploySelectedProject}
+              onNewProject={() => dispatch({ type: "SET_STEP", step: "source" })}
+            />
+          )}
           {state.step === "source" && (
             <SourceView
               busy={busy}
@@ -481,6 +545,132 @@ function OnboardingView() {
       </div>
       <button type="button" onClick={() => dispatch({ type: "SET_STEP", step: "source" })} className="mt-6 rounded-2xl bg-white px-5 py-3 font-semibold text-[#0B0B0F]">Continue to repositories</button>
     </section>
+  );
+}
+
+function ProjectsView(props: {
+  busy: string;
+  projects: ProjectSummary[];
+  selectedProject: ProjectSummary | null;
+  projectConfigText: string;
+  onRefresh: () => void;
+  onSelectProject: (project: ProjectSummary) => void;
+  onConfigChange: (value: string) => void;
+  onRedeploy: () => void;
+  onNewProject: () => void;
+}) {
+  const selected = props.selectedProject;
+  return (
+    <section className="grid grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)] gap-4 max-xl:grid-cols-1">
+      <div className="rounded-[36px] border border-white/5 bg-[#12121A]/80 p-5 shadow-tactile backdrop-blur-md">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200/60">Projects</p>
+            <h1 className="mt-3 text-5xl font-semibold tracking-[-0.07em]">Your deployments.</h1>
+            <p className="mt-2 text-sm text-white/45">Saved per account. Open a project to inspect, edit config, and redeploy.</p>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={props.onRefresh} className="rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 text-sm text-white/70 transition-all duration-200 hover:text-white">
+              {props.busy === "projects" ? "Refreshing..." : "Refresh"}
+            </button>
+            <button type="button" onClick={props.onNewProject} className="rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-[#0B0B0F]">
+              New project
+            </button>
+          </div>
+        </div>
+
+        <div className="grid gap-3">
+          {props.busy === "projects" && !props.projects.length && Array.from({ length: 4 }, (_, index) => <div key={index} className="h-24 animate-pulse rounded-3xl bg-white/[0.04]" />)}
+          {props.projects.map((project) => {
+            const active = selected?.deployment_id === project.deployment_id;
+            const status = String(project.status || project.last_job?.status || "unknown");
+            return (
+              <button
+                key={project.deployment_id}
+                type="button"
+                onClick={() => props.onSelectProject(project)}
+                className={`group rounded-3xl border p-4 text-left transition-all duration-200 ${active ? "border-cyan-300/35 bg-cyan-300/10 shadow-glow" : "border-white/5 bg-white/[0.035] hover:border-cyan-300/20 hover:bg-white/[0.055]"}`}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <strong className="block truncate text-lg text-white">{project.app_name}</strong>
+                    <span className="mt-1 block truncate font-mono text-xs text-white/40">{project.github_url || project.namespace}</span>
+                  </div>
+                  <span className="rounded-full border border-white/5 bg-[#0B0B0F]/50 px-3 py-1 font-mono text-xs uppercase tracking-[0.14em] text-cyan-100/70">{status}</span>
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2 font-mono text-xs text-white/40">
+                  <span>{project.git_revision || "default branch"}</span>
+                  {project.url && <span className="truncate text-cyan-100/60">{project.url}</span>}
+                  {project.updated_at && <span>{new Date(project.updated_at).toLocaleString()}</span>}
+                </div>
+              </button>
+            );
+          })}
+          {!props.projects.length && props.busy !== "projects" && (
+            <div className="rounded-3xl border border-dashed border-white/10 p-8 text-center">
+              <p className="text-white/60">No saved projects for this account yet.</p>
+              <button type="button" onClick={props.onNewProject} className="mt-4 rounded-2xl bg-white px-4 py-3 font-semibold text-[#0B0B0F]">Deploy your first project</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-[36px] border border-white/5 bg-[#12121A]/85 p-5 shadow-tactile backdrop-blur-md">
+        {!selected ? (
+          <div className="grid min-h-[420px] place-items-center rounded-[28px] border border-dashed border-white/10 text-center text-white/45">
+            Select a project to edit its saved deployment configuration.
+          </div>
+        ) : (
+          <div>
+            <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p className="font-mono text-xs uppercase tracking-[0.24em] text-cyan-200/60">Project detail</p>
+                <h2 className="mt-2 text-4xl font-semibold tracking-[-0.06em] text-white">{selected.app_name}</h2>
+                <p className="mt-2 break-all font-mono text-xs text-white/40">{selected.deployment_id}</p>
+              </div>
+              {selected.url && (
+                <a href={selected.url} target="_blank" rel="noreferrer" className="rounded-2xl border border-cyan-300/20 bg-cyan-300/10 px-4 py-3 text-sm text-cyan-100">
+                  Open URL
+                </a>
+              )}
+            </div>
+
+            <div className="mb-4 grid gap-3 md:grid-cols-3">
+              <InfoTile label="Repository" value={selected.github_url || "unknown"} />
+              <InfoTile label="Branch" value={selected.git_revision || "default"} />
+              <InfoTile label="Components" value={String(selected.components?.length || selected.deployment_config?.components?.length || 1)} />
+            </div>
+
+            <label className="block">
+              <span className="mb-2 block text-sm font-medium text-white/60">Saved deployment config</span>
+              <textarea
+                value={props.projectConfigText}
+                onChange={(event) => props.onConfigChange(event.target.value)}
+                spellCheck={false}
+                className="h-[420px] w-full resize-none rounded-3xl border border-white/5 bg-[#08080C] p-4 font-mono text-xs leading-6 text-white/70 outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={props.onRedeploy}
+              disabled={props.busy === "project-redeploy" || !props.projectConfigText.trim()}
+              className="mt-4 w-full rounded-2xl bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-3 font-semibold text-[#0B0B0F] shadow-glow disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {props.busy === "project-redeploy" ? "Redeploying..." : "Redeploy with this config"}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function InfoTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-white/5 bg-white/[0.035] p-3">
+      <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-white/35">{label}</p>
+      <p className="mt-2 truncate text-sm text-white/70">{value}</p>
+    </div>
   );
 }
 

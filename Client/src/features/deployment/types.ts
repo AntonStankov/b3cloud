@@ -1,6 +1,7 @@
 export type FlowStep =
   | "landing"
   | "onboarding"
+  | "projects"
   | "source"
   | "intelligence"
   | "blueprint"

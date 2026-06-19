@@ -229,15 +229,18 @@ class DeployJobStore:
     def _persist(self) -> None:
         self._jobs_path.write_text(json.dumps(self._jobs, indent=2, sort_keys=True))
 
-    def create_job(self, payload: AppDeployIn, defaults: Dict[str, str]) -> Dict[str, object]:
+    def create_job(self, payload: AppDeployIn, defaults: Dict[str, str], user_id: str = "") -> Dict[str, object]:
         with self._lock:
             now = _now()
             job_id = uuid.uuid4().hex
+            deployment_config = payload.model_dump()
+            deployment_config.pop("github_token", None)
             job = {
                 "job_id": job_id,
                 "status": "queued",
                 "created_at": now,
                 "updated_at": now,
+                "user_id": user_id,
                 "github_url": payload.github_url,
                 "git_revision": payload.git_revision,
                 "namespace": defaults["namespace"],
@@ -249,6 +252,7 @@ class DeployJobStore:
                 "redeploy_services": payload.redeploy_services,
                 "autoscaling": payload.autoscaling.model_dump(),
                 "components": [component.model_dump() for component in payload.components],
+                "deployment_config": deployment_config,
                 "logs": ["Job queued."],
                 "result": None,
                 "error": None,
@@ -1245,8 +1249,18 @@ def v1_list_deployments(
     namespace: Optional[str] = Query(default=None),
     x_api_key: Optional[str] = Header(default=None),
 ) -> List[Dict[str, object]]:
-    _require_user(request, x_api_key)
-    return _list_deployments(namespace)
+    user = _require_user(request, x_api_key)
+    return _list_deployments(namespace, user_id=_user_filter_id(user))
+
+
+@app.get("/api/v1/projects")
+def v1_list_projects(
+    request: Request,
+    namespace: Optional[str] = Query(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> List[Dict[str, object]]:
+    user = _require_user(request, x_api_key)
+    return _list_deployments(namespace, user_id=_user_filter_id(user))
 
 
 @app.post("/api/v1/deployments")
@@ -1255,10 +1269,19 @@ def v1_create_deployment(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    job = deploy_app(payload, x_api_key=svc.api_key)
+    user = _require_user(request, x_api_key)
+    job = _start_deploy_job(payload, user)
     job["deployment_id"] = _deployment_id(str(job["namespace"]), str(job["app_name"]))
     return job
+
+
+@app.get("/api/v1/projects/{deployment_id}")
+def v1_get_project(
+    deployment_id: str,
+    request: Request,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    return v1_get_deployment(deployment_id, request, x_api_key=x_api_key)
 
 
 @app.get("/api/v1/deployments/{deployment_id}")
@@ -1267,8 +1290,9 @@ def v1_get_deployment(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
     namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
     return _deployment_detail(namespace, app_name)
 
 
@@ -1279,8 +1303,9 @@ def v1_update_deployment(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
     namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
     return {
         "deployment_id": deployment_id,
         "namespace": namespace,
@@ -1298,8 +1323,9 @@ def v1_delete_deployment(
     payload: DeploymentDeleteIn = DeploymentDeleteIn(),
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
     namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
     _delete_application(namespace, app_name, delete_data=payload.delete_data)
     return {"deployment_id": deployment_id, "namespace": namespace, "app_name": app_name, "status": "deleted"}
 
@@ -1311,8 +1337,24 @@ def v1_redeploy(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
     return v1_create_deployment(payload, request, x_api_key)
+
+
+@app.post("/api/v1/projects/{deployment_id}/redeploy")
+def v1_redeploy_project(
+    deployment_id: str,
+    request: Request,
+    payload: Optional[AppDeployIn] = None,
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, object]:
+    user = _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
+    deploy_payload = payload or _latest_project_payload(namespace, app_name)
+    return v1_create_deployment(deploy_payload, request, x_api_key)
 
 
 @app.post("/api/v1/deployments/{deployment_id}/rollback")
@@ -1321,7 +1363,7 @@ def v1_rollback(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    _authorized_deployment(deployment_id, request, x_api_key)
     raise HTTPException(status_code=409, detail="Rollback requires retaining previous releases; old releases are currently cleaned after successful switch")
 
 
@@ -1331,8 +1373,7 @@ def v1_stop_deployment(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, app_name = _parse_deployment_id(deployment_id)
+    namespace, app_name = _authorized_deployment(deployment_id, request, x_api_key)
     deployment_name = _active_app_deployment(namespace, app_name).metadata.name
     svc.core._delete_hpa_if_exists(namespace, app_name)
     _scale_deployment(namespace, deployment_name, 0)
@@ -1345,8 +1386,7 @@ def v1_start_deployment(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, app_name = _parse_deployment_id(deployment_id)
+    namespace, app_name = _authorized_deployment(deployment_id, request, x_api_key)
     deployment_name = _active_app_deployment(namespace, app_name).metadata.name
     _scale_deployment(namespace, deployment_name, 1)
     autoscaling = _latest_autoscaling_config(namespace, app_name)
@@ -1361,8 +1401,9 @@ def v1_deployment_jobs(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> List[Dict[str, object]]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
     namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
     return [
         job
         for job in svc.jobs.list_jobs()
@@ -1372,19 +1413,25 @@ def v1_deployment_jobs(
 
 @app.get("/api/v1/deploy-jobs")
 def v1_list_deploy_jobs(request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, object]]:
-    _require_user(request, x_api_key)
-    return svc.jobs.list_jobs()
+    user = _require_user(request, x_api_key)
+    return _filter_jobs_for_user(svc.jobs.list_jobs(), user)
 
 
 @app.get("/api/v1/deploy-jobs/{job_id}")
 def v1_get_deploy_job(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    return get_deploy_job(job_id, x_api_key=svc.api_key)
+    user = _require_user(request, x_api_key)
+    job = get_deploy_job(job_id, x_api_key=svc.api_key)
+    _require_job_access(job, user)
+    return job
 
 
 @app.get("/api/v1/deploy-jobs/{job_id}/events")
 def v1_deploy_job_events(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> StreamingResponse:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
+    job = svc.jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    _require_job_access(job, user)
 
     def event_stream():
         sent = 0
@@ -1409,10 +1456,11 @@ def v1_deploy_job_events(job_id: str, request: Request, x_api_key: Optional[str]
 
 @app.post("/api/v1/deploy-jobs/{job_id}/cancel")
 def v1_cancel_deploy_job(job_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    user = _require_user(request, x_api_key)
     job = svc.jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    _require_job_access(job, user)
     if str(job.get("status")) not in {"queued"}:
         raise HTTPException(status_code=409, detail="Only queued jobs can be cancelled")
     svc.jobs.set_status(job_id, "cancelled")
@@ -1426,8 +1474,7 @@ def v1_deployment_components(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> List[Dict[str, object]]:
-    _require_user(request, x_api_key)
-    namespace, app_name = _parse_deployment_id(deployment_id)
+    namespace, app_name = _authorized_deployment(deployment_id, request, x_api_key)
     return _deployment_components(namespace, app_name)
 
 
@@ -1438,8 +1485,7 @@ def v1_deployment_component(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, _ = _parse_deployment_id(deployment_id)
+    namespace, _ = _authorized_deployment(deployment_id, request, x_api_key)
     return _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=80)
 
 
@@ -1450,8 +1496,7 @@ def v1_restart_component(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, _ = _parse_deployment_id(deployment_id)
+    namespace, _ = _authorized_deployment(deployment_id, request, x_api_key)
     dep = _active_app_deployment(namespace, component_id)
     svc.core.apps.patch_namespaced_deployment(
         dep.metadata.name,
@@ -1469,8 +1514,7 @@ def v1_component_runtime_logs(
     tail_lines: int = Query(default=160, ge=20, le=500),
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, _ = _parse_deployment_id(deployment_id)
+    namespace, _ = _authorized_deployment(deployment_id, request, x_api_key)
     return _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=tail_lines)
 
 
@@ -1481,8 +1525,7 @@ def v1_component_pods(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> List[Dict[str, object]]:
-    _require_user(request, x_api_key)
-    namespace, _ = _parse_deployment_id(deployment_id)
+    namespace, _ = _authorized_deployment(deployment_id, request, x_api_key)
     logs = _runtime_logs_for_component(namespace, component_id, component_id, tail_lines=80)
     return list(logs.get("pods", []))
 
@@ -1498,8 +1541,7 @@ def v1_component_container_logs(
     previous: bool = Query(default=False),
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, _ = _parse_deployment_id(deployment_id)
+    namespace, _ = _authorized_deployment(deployment_id, request, x_api_key)
     return app_container_logs(namespace, component_id, pod_name, container_name, tail_lines, previous, x_api_key=svc.api_key)
 
 
@@ -1509,8 +1551,7 @@ def v1_deployment_logs(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
-    namespace, app_name = _parse_deployment_id(deployment_id)
+    namespace, app_name = _authorized_deployment(deployment_id, request, x_api_key)
     jobs = v1_deployment_jobs(deployment_id, request, x_api_key=x_api_key)
     return {
         "deployment_id": deployment_id,
@@ -1523,7 +1564,7 @@ def v1_deployment_logs(
 
 @app.get("/api/v1/deployments/{deployment_id}/env")
 def v1_deployment_env(deployment_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    _authorized_deployment(deployment_id, request, x_api_key)
     return {"deployment_id": deployment_id, "env": [], "detail": "Environment persistence API is reserved for the frontend config store."}
 
 
@@ -1535,7 +1576,7 @@ def v1_update_deployment_env(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    _authorized_deployment(deployment_id, request, x_api_key)
     return {"deployment_id": deployment_id, "status": "accepted", "env": {key: "***" for key in payload}}
 
 
@@ -1546,13 +1587,13 @@ def v1_update_deployment_secrets(
     request: Request,
     x_api_key: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    _require_user(request, x_api_key)
+    _authorized_deployment(deployment_id, request, x_api_key)
     return {"deployment_id": deployment_id, "status": "accepted", "secrets": list(payload.keys())}
 
 
 @app.get("/api/v1/deployments/{deployment_id}/domains")
 def v1_deployment_domains(deployment_id: str, request: Request, x_api_key: Optional[str] = Header(default=None)) -> List[Dict[str, str]]:
-    _require_user(request, x_api_key)
+    _authorized_deployment(deployment_id, request, x_api_key)
     detail = v1_get_deployment(deployment_id, request, x_api_key=x_api_key)
     url = str(detail.get("url") or "")
     return [{"domain": url.replace("https://", ""), "status": "active"}] if url else []
@@ -1622,9 +1663,13 @@ def deploy_app(
     x_api_key: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    svc.auth(x_api_key, authorization)
+    user = svc.auth(x_api_key, authorization)
+    return _start_deploy_job(payload, user)
+
+
+def _start_deploy_job(payload: AppDeployIn, user: Dict[str, object]) -> Dict[str, object]:
     defaults = svc.defaults_from_github_url(payload.github_url)
-    job = svc.jobs.create_job(payload, defaults)
+    job = svc.jobs.create_job(payload, defaults, user_id=str(user.get("id") or ""))
     threading.Thread(
         target=_run_deploy_job,
         args=(job["job_id"], payload, defaults),
@@ -1639,8 +1684,8 @@ def list_deploy_jobs(
     x_api_key: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
 ) -> List[Dict[str, object]]:
-    svc.auth(x_api_key, authorization)
-    return svc.jobs.list_jobs()
+    user = svc.auth(x_api_key, authorization)
+    return _filter_jobs_for_user(svc.jobs.list_jobs(), user)
 
 
 @app.get("/deploy-jobs/{job_id}")
@@ -1649,10 +1694,11 @@ def get_deploy_job(
     x_api_key: Optional[str] = Header(default=None),
     authorization: Optional[str] = Header(default=None),
 ) -> Dict[str, object]:
-    svc.auth(x_api_key, authorization)
+    user = svc.auth(x_api_key, authorization)
     job = svc.jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Deploy job not found: {job_id}")
+    _require_job_access(job, user)
     _attach_runtime_logs(job)
     return job
 
@@ -1777,6 +1823,13 @@ def _require_user(request: Request, x_api_key: Optional[str]) -> Dict[str, objec
     return user
 
 
+def _authorized_deployment(deployment_id: str, request: Request, x_api_key: Optional[str]) -> tuple[str, str]:
+    user = _require_user(request, x_api_key)
+    namespace, app_name = _parse_deployment_id(deployment_id)
+    _require_project_access(namespace, app_name, user)
+    return namespace, app_name
+
+
 def _deployment_id(namespace: str, app_name: str) -> str:
     return f"{namespace}:{app_name}"
 
@@ -1790,10 +1843,56 @@ def _parse_deployment_id(deployment_id: str) -> tuple[str, str]:
     return namespace, app_name
 
 
-def _list_deployments(namespace: Optional[str] = None) -> List[Dict[str, object]]:
+def _user_filter_id(user: Dict[str, object]) -> Optional[str]:
+    user_id = str(user.get("id") or "")
+    return None if user_id == "api-key" else user_id
+
+
+def _filter_jobs_for_user(jobs: List[Dict[str, object]], user: Dict[str, object]) -> List[Dict[str, object]]:
+    user_id = _user_filter_id(user)
+    if user_id is None:
+        return jobs
+    return [job for job in jobs if str(job.get("user_id") or "") == user_id]
+
+
+def _require_job_access(job: Dict[str, object], user: Dict[str, object]) -> None:
+    user_id = _user_filter_id(user)
+    if user_id is None:
+        return
+    if str(job.get("user_id") or "") != user_id:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
+def _require_project_access(namespace: str, app_name: str, user: Dict[str, object]) -> None:
+    user_id = _user_filter_id(user)
+    if user_id is None:
+        return
+    for job in svc.jobs.list_jobs():
+        if (
+            str(job.get("namespace") or "") == namespace
+            and str(job.get("app_name") or "") == app_name
+            and str(job.get("user_id") or "") == user_id
+        ):
+            return
+    raise HTTPException(status_code=404, detail="Project not found")
+
+
+def _latest_project_payload(namespace: str, app_name: str) -> AppDeployIn:
+    for job in svc.jobs.list_jobs():
+        if str(job.get("namespace") or "") != namespace or str(job.get("app_name") or "") != app_name:
+            continue
+        config_payload = job.get("deployment_config")
+        if isinstance(config_payload, dict):
+            return AppDeployIn(**config_payload)
+    raise HTTPException(status_code=404, detail="Saved deployment config not found")
+
+
+def _list_deployments(namespace: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, object]]:
     seen: set[tuple[str, str]] = set()
     deployments: List[Dict[str, object]] = []
     for job in svc.jobs.list_jobs():
+        if user_id is not None and str(job.get("user_id") or "") != user_id:
+            continue
         job_namespace = str(job.get("namespace") or "")
         job_app_name = str(job.get("app_name") or "")
         if not job_namespace or not job_app_name or (namespace and job_namespace != namespace):
@@ -1813,6 +1912,10 @@ def _list_deployments(namespace: Optional[str] = None) -> List[Dict[str, object]
             }
         detail["last_job"] = job
         deployments.append(detail)
+
+    if user_id is not None:
+        deployments.sort(key=lambda item: str((item.get("last_job") or {}).get("updated_at") or item.get("updated_at") or ""), reverse=True)
+        return deployments
 
     kube_deployments = (
         svc.core.apps.list_namespaced_deployment(namespace).items
@@ -1834,7 +1937,17 @@ def _list_deployments(namespace: Optional[str] = None) -> List[Dict[str, object]
 
 
 def _deployment_detail(namespace: str, app_name: str) -> Dict[str, object]:
-    status = app_status(namespace, app_name, x_api_key=svc.api_key)
+    try:
+        status = app_status(namespace, app_name, x_api_key=svc.api_key)
+    except Exception:
+        status = {
+            "namespace": namespace,
+            "app_name": app_name,
+            "replicas": "0",
+            "ready_replicas": "0",
+            "image": "",
+            "status": "not_ready",
+        }
     jobs = [
         job
         for job in svc.jobs.list_jobs()
@@ -1860,6 +1973,7 @@ def _deployment_detail(namespace: str, app_name: str) -> Dict[str, object]:
             "git_revision": git_revision,
             "components": components,
             "last_job": latest_job,
+            "deployment_config": latest_job.get("deployment_config") if latest_job else None,
             "updated_at": latest_job.get("updated_at") if latest_job else "",
         }
     )

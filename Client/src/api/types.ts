@@ -88,6 +88,7 @@ export interface ComponentDeployInput {
   path: string;
   type: ComponentType;
   public: boolean;
+  api_path_prefix?: string;
   port: number;
   auto_detect_services: boolean;
   provision_services: string[];
@@ -156,10 +157,14 @@ export interface DeployJob {
   status: DeployJobStatus;
   created_at?: string;
   updated_at?: string;
+  user_id?: string;
   github_url?: string;
+  git_revision?: string;
   namespace?: string;
   app_name?: string;
   domain?: string;
+  components?: ComponentDeployInput[];
+  deployment_config?: DeployInput;
   logs: string[];
   result: Record<string, unknown> | null;
   error: string | null;
@@ -179,6 +184,17 @@ export interface AppStatus extends AppSummary {
   deployment_name?: string;
   status: string;
   autoscaling?: Record<string, unknown>;
+}
+
+export interface ProjectSummary extends AppStatus {
+  deployment_id: string;
+  url?: string;
+  github_url?: string;
+  git_revision?: string;
+  components?: Array<Record<string, unknown>>;
+  last_job?: DeployJob | null;
+  deployment_config?: DeployInput | null;
+  updated_at?: string;
 }
 
 export interface RuntimeContainerLog {
