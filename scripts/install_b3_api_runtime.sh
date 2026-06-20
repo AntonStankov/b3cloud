@@ -182,8 +182,6 @@ fi
 
 docker pull paketobuildpacks/builder-jammy-base:latest || true
 docker pull paketobuildpacks/run-jammy-base:latest || true
-docker pull node:24-alpine || true
-docker pull nginx:1.27-alpine || true
 
 log "disk after cleanup: $(df -h / | awk 'NR==2 {print $4 " free of " $2 " (" $5 " used)"}')"
 docker system df || true

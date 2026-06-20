@@ -646,31 +646,6 @@ class PlatformCore:
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
             self._emit_status(status_callback, f"Using app path: {app_dir}.")
-            inferred_build_env = self._infer_build_env(app_dir)
-            if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
-                self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
-            self._prepare_node_lockfile(app_dir, status_callback=status_callback)
-
-            build_env = {**inferred_build_env, **req.env, "PORT": str(req.port)}
-            if self._can_use_static_frontend_fast_path(app_dir, build_env):
-                try:
-                    self._emit_status(status_callback, "Detected static frontend; using fast Docker/NGINX build path.")
-                    self._build_static_frontend_image(
-                        app_dir,
-                        output_image,
-                        build_env,
-                        req.port,
-                        env=env,
-                        status_callback=status_callback,
-                    )
-                    self._emit_status(status_callback, f"Image published: {output_image}.")
-                    return output_image
-                except RuntimeError as exc:
-                    self._emit_status(
-                        status_callback,
-                        f"Static frontend fast path failed; falling back to Buildpacks: {exc}",
-                    )
-
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
@@ -689,6 +664,10 @@ class PlatformCore:
                 "--publish",
                 "--verbose",
             ]
+            inferred_build_env = self._infer_build_env(app_dir)
+            if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
+                self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
+            self._prepare_node_lockfile(app_dir, status_callback=status_callback)
             for key, value in inferred_build_env.items():
                 env[key] = value
                 cmd.extend(["--env", f"{key}={value}"])
@@ -711,191 +690,6 @@ class PlatformCore:
             self._emit_status(status_callback, f"Image published: {output_image}.")
 
         return output_image
-
-    def _can_use_static_frontend_fast_path(self, app_dir: Path, build_env: Dict[str, str]) -> bool:
-        if os.getenv("B3CLOUD_STATIC_FRONTEND_FAST_PATH", "1").strip().lower() in {"0", "false", "no", "off"}:
-            return False
-        package_json = app_dir / "package.json"
-        if not package_json.exists():
-            return False
-        try:
-            package_data = json.loads(package_json.read_text())
-        except (OSError, json.JSONDecodeError):
-            return False
-        scripts = package_data.get("scripts")
-        if not isinstance(scripts, dict) or not isinstance(scripts.get("build"), str):
-            return False
-        dependencies = {
-            **self._json_object(package_data.get("dependencies")),
-            **self._json_object(package_data.get("devDependencies")),
-            **self._json_object(package_data.get("optionalDependencies")),
-        }
-        frontend_markers = {"vite", "react-scripts", "@vue/cli-service", "@angular/cli", "svelte", "@sveltejs/vite-plugin-svelte"}
-        if not frontend_markers.intersection(dependencies):
-            return False
-        if any(marker in dependencies for marker in ("next", "nuxt", "@nestjs/core", "express", "fastify", "koa", "hapi")):
-            return False
-        if not self._frontend_build_env_is_safe(build_env):
-            return False
-        return True
-
-    def _build_static_frontend_image(
-        self,
-        app_dir: Path,
-        output_image: str,
-        build_env: Dict[str, str],
-        port: int,
-        env: Dict[str, str],
-        status_callback: Optional[Callable[[str], None]] = None,
-    ) -> None:
-        package_data = self._read_package_json(app_dir)
-        output_dir = self._detect_static_output_dir(package_data, app_dir)
-        package_manager = self._detect_node_package_manager(app_dir)
-        build_args = self._frontend_build_args(build_env)
-        dockerfile = app_dir / ".b3cloud-static.Dockerfile"
-        nginx_template = app_dir / ".b3cloud-nginx.conf.template"
-        dockerignore = app_dir / ".dockerignore"
-
-        build_arg_declarations = "\n".join(f"ARG {key}\nENV {key}=${key}" for key in sorted(build_args))
-        install_command = {
-            "npm-ci": "npm ci --no-audit --no-fund",
-            "npm-install": "npm install --no-audit --no-fund",
-            "pnpm": "corepack enable && pnpm install --frozen-lockfile",
-            "yarn": "corepack enable && yarn install --immutable",
-        }[package_manager]
-        build_command = {
-            "npm-ci": "npm run build",
-            "npm-install": "npm run build",
-            "pnpm": "corepack enable && pnpm run build",
-            "yarn": "corepack enable && yarn build",
-        }[package_manager]
-        dependency_copy_lines = ["COPY package.json ./"]
-        if package_manager == "npm-ci":
-            dependency_copy_lines.append("COPY package-lock.json ./")
-        elif package_manager == "pnpm":
-            dependency_copy_lines.append("COPY pnpm-lock.yaml ./")
-        elif package_manager == "yarn":
-            dependency_copy_lines.append("COPY yarn.lock ./")
-
-        dockerfile.write_text(
-            "\n".join(
-                [
-                    "FROM node:24-alpine AS build",
-                    "WORKDIR /app",
-                    *dependency_copy_lines,
-                    f"RUN {install_command}",
-                    "COPY . .",
-                    build_arg_declarations,
-                    f"RUN {build_command}",
-                    "FROM nginx:1.27-alpine",
-                    "COPY .b3cloud-nginx.conf.template /etc/nginx/templates/default.conf.template",
-                    f"COPY --from=build /app/{output_dir} /usr/share/nginx/html",
-                    f"ENV PORT={port}",
-                    f"EXPOSE {port}",
-                ]
-            )
-            + "\n"
-        )
-        nginx_template.write_text(
-            """
-server {
-  listen ${PORT};
-  server_name _;
-  root /usr/share/nginx/html;
-  index index.html;
-
-  location / {
-    try_files $uri $uri/ /index.html;
-  }
-}
-""".lstrip()
-        )
-        if not dockerignore.exists():
-            dockerignore.write_text(
-                """
-.git
-node_modules
-dist
-build
-.next
-coverage
-.cache
-.b3cloud-static.Dockerfile
-""".lstrip()
-            )
-
-        cmd = [
-            "docker",
-            "build",
-            "--pull=false",
-            "-f",
-            str(dockerfile),
-            "-t",
-            output_image,
-        ]
-        for key, value in sorted(build_args.items()):
-            cmd.extend(["--build-arg", f"{key}={value}"])
-        cmd.append(str(app_dir))
-        self._run_command(cmd, env=env, stream_callback=status_callback)
-        self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
-        try:
-            self._run_command(["docker", "rmi", output_image], env=env)
-        except RuntimeError:
-            pass
-
-    @staticmethod
-    def _read_package_json(app_dir: Path) -> Dict[str, object]:
-        try:
-            data = json.loads((app_dir / "package.json").read_text())
-            return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    @staticmethod
-    def _json_object(value: object) -> Dict[str, object]:
-        return value if isinstance(value, dict) else {}
-
-    @staticmethod
-    def _detect_static_output_dir(package_data: Dict[str, object], app_dir: Path) -> str:
-        scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
-        build_script = str(scripts.get("build") or "") if isinstance(scripts, dict) else ""
-        if "ng build" in build_script:
-            project_name = str(package_data.get("name") or "").strip()
-            if project_name:
-                return f"dist/{project_name}"
-        if (app_dir / "public").exists() and "react-scripts build" in build_script:
-            return "build"
-        return "dist"
-
-    @staticmethod
-    def _detect_node_package_manager(app_dir: Path) -> str:
-        if (app_dir / "pnpm-lock.yaml").exists():
-            return "pnpm"
-        if (app_dir / "yarn.lock").exists():
-            return "yarn"
-        if (app_dir / "package-lock.json").exists():
-            return "npm-ci"
-        return "npm-install"
-
-    @classmethod
-    def _frontend_build_env_is_safe(cls, build_env: Dict[str, str]) -> bool:
-        return all(not cls._looks_sensitive_env_name(key) for key in build_env)
-
-    @classmethod
-    def _frontend_build_args(cls, build_env: Dict[str, str]) -> Dict[str, str]:
-        return {
-            key: str(value)
-            for key, value in build_env.items()
-            if key
-            and value is not None
-            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
-            and not cls._looks_sensitive_env_name(key)
-        }
-
-    @staticmethod
-    def _looks_sensitive_env_name(key: str) -> bool:
-        upper = key.upper()
-        return any(marker in upper for marker in ("SECRET", "TOKEN", "PASSWORD", "PASS", "CREDENTIAL", "PRIVATE", "ACCESS_KEY", "API_KEY"))
 
     def _ensure_registry_seed_image(self, req: DeploymentRequest, env: Dict[str, str]) -> None:
         registry_host = req.registry_repo.split("/")[0].lower()
