@@ -706,6 +706,7 @@ class PlatformCore:
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
             self._prepare_java_start_command(app_dir, status_callback=status_callback)
+            self._prepare_php_start_command(app_dir, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -723,6 +724,7 @@ class PlatformCore:
             inferred_build_env = {**build_plan.build_env, **self._infer_build_env(app_dir)}
             if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
                 self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
+            self._prepare_node_package_manager(app_dir, status_callback=status_callback)
             self._prepare_node_lockfile(app_dir, status_callback=status_callback)
             for key, value in inferred_build_env.items():
                 env[key] = value
@@ -805,7 +807,7 @@ class PlatformCore:
             context.append("lockfiles=" + ", ".join(lockfiles))
         detail = " ".join(context)
         if "pnpm-lock.yaml" in lockfiles and not package_manager:
-            return "Node dependency installation failed. pnpm-lock.yaml exists but package.json has no packageManager; add packageManager for pnpm or use npm/package-lock.json."
+            return "Node dependency installation failed. pnpm-lock.yaml exists but package.json has no packageManager. The platform will infer pnpm; if this still fails, commit packageManager and verify pnpm install locally."
         if len(lockfiles) > 1 and not package_manager:
             return "Node dependency installation failed. Multiple lockfiles exist without packageManager; keep one lockfile or set packageManager. " + detail
         return "Node dependency installation failed. Check package.json, lockfile freshness, packageManager, and registry access. " + detail
@@ -2994,6 +2996,33 @@ class PlatformCore:
         )
 
     @staticmethod
+    def _prepare_php_start_command(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        procfile = app_dir / "Procfile"
+        if procfile.exists() or not (app_dir / "composer.json").exists():
+            return
+
+        composer = PlatformCore._read_json_file(app_dir / "composer.json")
+        requires = composer.get("require", {}) if isinstance(composer.get("require"), dict) else {}
+        if "laravel/framework" in requires and (app_dir / "artisan").exists():
+            procfile.write_text("web: php artisan serve --host=0.0.0.0 --port=${PORT:-8080}\n")
+            PlatformCore._emit_status(
+                status_callback,
+                "Detected Laravel app; generated Procfile using php artisan serve.",
+            )
+            return
+
+        public_index = app_dir / "public" / "index.php"
+        if public_index.exists():
+            procfile.write_text("web: php -S 0.0.0.0:${PORT:-8080} -t public\n")
+            PlatformCore._emit_status(
+                status_callback,
+                "Detected PHP public/index.php; generated Procfile using PHP built-in server.",
+            )
+
+    @staticmethod
     def _prepare_static_frontend_build(
         app_dir: Path,
         status_callback: Optional[Callable[[str], None]] = None,
@@ -3029,6 +3058,41 @@ class PlatformCore:
 
 
     @staticmethod
+    def _prepare_node_package_manager(
+        app_dir: Path,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        package_json = app_dir / "package.json"
+        if not package_json.exists():
+            return
+
+        try:
+            package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+
+        if str(package_data.get("packageManager") or "").strip():
+            return
+
+        inferred = ""
+        if (app_dir / "pnpm-lock.yaml").exists() and not (app_dir / "package-lock.json").exists() and not (app_dir / "yarn.lock").exists():
+            inferred = "pnpm@9.15.9"
+        elif (app_dir / "yarn.lock").exists() and not (app_dir / "package-lock.json").exists() and not (app_dir / "pnpm-lock.yaml").exists():
+            inferred = "yarn@1.22.22"
+        elif (app_dir / "package-lock.json").exists() and not (app_dir / "pnpm-lock.yaml").exists() and not (app_dir / "yarn.lock").exists():
+            inferred = "npm@10.9.2"
+
+        if not inferred:
+            return
+
+        package_data["packageManager"] = inferred
+        package_json.write_text(json.dumps(package_data, indent=2) + "\n")
+        PlatformCore._emit_status(
+            status_callback,
+            f"Detected single JavaScript lockfile without packageManager; using {inferred} for this build context.",
+        )
+
+    @staticmethod
     def _prepare_node_lockfile(
         app_dir: Path,
         status_callback: Optional[Callable[[str], None]] = None,
@@ -3041,17 +3105,6 @@ class PlatformCore:
         try:
             package_data = json.loads(package_json.read_text())
         except (OSError, json.JSONDecodeError):
-            return
-
-        package_manager = str(package_data.get("packageManager") or "").strip().lower()
-        pnpm_lock = app_dir / "pnpm-lock.yaml"
-        if pnpm_lock.exists() and not package_lock.exists() and not package_manager:
-            PlatformCore._ignore_node_lockfile(
-                pnpm_lock,
-                status_callback,
-                "Detected pnpm-lock.yaml without packageManager in package.json; ignoring pnpm lockfile for this build "
-                "so Paketo can use npm install. Add packageManager if this project must be built with pnpm.",
-            )
             return
 
         if not package_lock.exists():
