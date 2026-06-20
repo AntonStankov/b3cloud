@@ -2289,6 +2289,18 @@ class PlatformCore:
     @staticmethod
     def _classify_component(app_dir: Path) -> tuple[str, list[str]]:
         evidence: list[str] = []
+        if (app_dir / "composer.json").exists() or any((app_dir / name).exists() for name in ("artisan", "public/index.php", "index.php")):
+            composer = PlatformCore._read_json_file(app_dir / "composer.json")
+            requires = {**composer.get("require", {}), **composer.get("require-dev", {})} if isinstance(composer, dict) else {}
+            if any(dep in requires for dep in ("laravel/framework", "symfony/framework-bundle", "slim/slim", "cakephp/cakephp", "laminas/laminas-mvc")):
+                evidence.append("PHP web framework")
+                return "backend", evidence
+            if (app_dir / "public/index.php").exists() or (app_dir / "index.php").exists():
+                evidence.append("PHP web entrypoint")
+                return "backend", evidence
+            evidence.append("PHP Composer project")
+            return "worker", evidence
+
         package_json = app_dir / "package.json"
         dependencies: Dict[str, str] = {}
         scripts: Dict[str, str] = {}
@@ -2319,17 +2331,6 @@ class PlatformCore:
                 evidence.append("Python web framework")
                 return "backend", evidence
             evidence.append("Python project")
-            return "worker", evidence
-        if (app_dir / "composer.json").exists() or any((app_dir / name).exists() for name in ("artisan", "public/index.php", "index.php")):
-            composer = PlatformCore._read_json_file(app_dir / "composer.json")
-            requires = {**composer.get("require", {}), **composer.get("require-dev", {})} if isinstance(composer, dict) else {}
-            if any(dep in requires for dep in ("laravel/framework", "symfony/framework-bundle", "slim/slim", "cakephp/cakephp", "laminas/laminas-mvc")):
-                evidence.append("PHP web framework")
-                return "backend", evidence
-            if (app_dir / "public/index.php").exists() or (app_dir / "index.php").exists():
-                evidence.append("PHP web entrypoint")
-                return "backend", evidence
-            evidence.append("PHP Composer project")
             return "worker", evidence
         if (app_dir / "go.mod").exists():
             evidence.append("Go module")
@@ -2432,6 +2433,18 @@ class PlatformCore:
         language: str = "unknown",
         framework: str = "unknown",
     ) -> BuildPlan:
+        if (app_dir / "composer.json").exists() or (app_dir / "artisan").exists() or (app_dir / "public/index.php").exists():
+            warnings = []
+            if (app_dir / "Dockerfile").exists():
+                warnings.append("Dockerfile detected. Current deployment uses Buildpacks, so Dockerfile instructions are not executed.")
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command="PHP/Composer buildpack default",
+                start_command="PHP buildpack default",
+                confidence="medium",
+                evidence=["PHP Composer or web entrypoint detected."],
+                warnings=warnings,
+            )
         if (app_dir / "package.json").exists():
             return cls._detect_node_build_plan(app_dir, component_type, framework)
         if (app_dir / "pom.xml").exists() or (app_dir / "build.gradle").exists() or (app_dir / "build.gradle.kts").exists():
@@ -2453,18 +2466,6 @@ class PlatformCore:
                 start_command="Procfile/generated process when framework is detected",
                 confidence="medium",
                 evidence=["Python dependency file detected."],
-            )
-        if (app_dir / "composer.json").exists() or (app_dir / "artisan").exists() or (app_dir / "public/index.php").exists():
-            warnings = []
-            if (app_dir / "Dockerfile").exists():
-                warnings.append("Dockerfile detected. Current deployment uses Buildpacks, so Dockerfile instructions are not executed.")
-            return BuildPlan(
-                runtime_mode="server" if component_type == "backend" else "worker",
-                build_command="PHP/Composer buildpack default",
-                start_command="PHP buildpack default",
-                confidence="medium",
-                evidence=["PHP Composer or web entrypoint detected."],
-                warnings=warnings,
             )
         if (app_dir / "go.mod").exists():
             return BuildPlan(
