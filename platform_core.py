@@ -2402,11 +2402,31 @@ class PlatformCore:
             scripts = package_data.get("scripts", {})
             dependencies = package_data.get("dependencies", {})
             dev_dependencies = package_data.get("devDependencies", {})
-            has_build = isinstance(scripts.get("build"), str) and scripts["build"].strip() != ""
-            has_start = isinstance(scripts.get("start"), str) and scripts["start"].strip() != ""
+            build_script = scripts.get("build")
+            has_build = isinstance(build_script, str) and build_script.strip() != ""
             combined_dependencies = {**dependencies, **dev_dependencies}
-            is_frontend = any(dep in combined_dependencies for dep in ("vite", "@vitejs/plugin-react", "react", "react-dom"))
-            if has_build and not has_start and is_frontend:
+            backend_dependencies = {"express", "fastify", "koa", "hapi", "@nestjs/core", "next", "nuxt"}
+            static_frontend_build_markers = (
+                "vite build",
+                "react-scripts build",
+                "ng build",
+                "vue-cli-service build",
+                "svelte-kit sync",
+            )
+            is_static_frontend = (
+                has_build
+                and not backend_dependencies.intersection(combined_dependencies)
+                and (
+                    "vite" in combined_dependencies
+                    or "@vitejs/plugin-react" in combined_dependencies
+                    or "react-scripts" in combined_dependencies
+                    or "@angular/cli" in combined_dependencies
+                    or "@vue/cli-service" in combined_dependencies
+                    or "@sveltejs/vite-plugin-svelte" in combined_dependencies
+                    or any(marker in str(build_script) for marker in static_frontend_build_markers)
+                )
+            )
+            if is_static_frontend:
                 env.update(
                     {
                         "BP_NODE_RUN_SCRIPTS": "build",
