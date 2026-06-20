@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -679,6 +680,12 @@ class PlatformCore:
             )
             for warning in build_plan.warnings:
                 self._emit_status(status_callback, f"Build plan warning: {warning}")
+            if build_plan.runtime_mode == "dockerfile":
+                self._emit_status(status_callback, f"Running Dockerfile publish to {output_image}.")
+                self._run_command(["docker", "build", "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
+                self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
+                self._emit_status(status_callback, f"Image published: {output_image}.")
+                return output_image
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
@@ -1997,6 +2004,7 @@ class PlatformCore:
             "composer.json",
             "pom.xml",
             "build.gradle",
+            "Dockerfile",
         }
         ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next"}
         candidates: list[Path] = []
@@ -2357,6 +2365,19 @@ class PlatformCore:
         if package_json.exists():
             evidence.append("generic Node.js package; no web framework or start script detected")
             return "worker", evidence
+        dockerfile = app_dir / "Dockerfile"
+        if dockerfile.exists():
+            docker_text = dockerfile.read_text(errors="ignore").lower()
+            source_text = ""
+            for filename in ("main.py", "app.py", "server.py"):
+                path = app_dir / filename
+                if path.exists():
+                    source_text += path.read_text(errors="ignore").lower()
+            if "fastapi" in source_text or "uvicorn" in docker_text or "expose" in docker_text:
+                evidence.append("Dockerfile web service")
+                return "backend", evidence
+            evidence.append("Dockerfile component")
+            return "worker", evidence
         evidence.append("deployable project marker")
         return "worker", evidence
 
@@ -2419,6 +2440,18 @@ class PlatformCore:
                 return "javascript", "NestJS", "high", warnings
             warnings.append("Node package detected, but no supported frontend/backend framework or start script was found.")
             return "javascript", "Node package", "low", warnings
+        if (app_dir / "Dockerfile").exists():
+            dockerfile = (app_dir / "Dockerfile").read_text(errors="ignore").lower()
+            source_text = ""
+            for filename in ("main.py", "app.py", "server.py"):
+                path = app_dir / filename
+                if path.exists():
+                    source_text += path.read_text(errors="ignore").lower()
+            if "fastapi" in source_text:
+                return "python", "FastAPI (Dockerfile)", "medium", warnings
+            if "python" in dockerfile or any((app_dir / name).exists() for name in ("main.py", "app.py", "server.py")):
+                return "python", "Python (Dockerfile)", "medium", warnings
+            return "dockerfile", "Dockerfile", "medium", warnings
         warnings.append("No supported framework marker was found. Review component path and build settings manually.")
         return "unknown", "unknown", "low", warnings
 
@@ -2479,12 +2512,69 @@ class PlatformCore:
                 confidence="medium",
                 evidence=["Go module detected."],
             )
+        if (app_dir / "Dockerfile").exists():
+            warnings = [
+                "Dockerfile-only component detected. The platform will build and push this Dockerfile instead of using Buildpacks."
+            ]
+            missing_sources = cls._dockerfile_missing_copy_sources(app_dir)
+            if missing_sources:
+                warnings.append(
+                    "Dockerfile references files that are missing from this component path: "
+                    + ", ".join(missing_sources[:8])
+                    + ("." if len(missing_sources) <= 8 else ", ...")
+                )
+            return BuildPlan(
+                runtime_mode="dockerfile",
+                build_command="docker build",
+                start_command="Dockerfile CMD/ENTRYPOINT",
+                confidence="medium" if not missing_sources else "low",
+                evidence=["Dockerfile detected without a Buildpacks project marker."],
+                warnings=warnings,
+            )
         return BuildPlan(
             runtime_mode=component_type if component_type in {"frontend", "backend", "worker"} else "unknown",
             confidence="low",
             evidence=["No precise build plan could be inferred."],
             warnings=["Build plan confidence is low; Buildpacks will use default detection."],
         )
+
+    @staticmethod
+    def _dockerfile_missing_copy_sources(app_dir: Path) -> list[str]:
+        dockerfile = app_dir / "Dockerfile"
+        if not dockerfile.exists():
+            return []
+        try:
+            content = dockerfile.read_text(errors="ignore")
+        except OSError:
+            return []
+        missing: list[str] = []
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            match = re.match(r"(?i)^(?:COPY|ADD)\s+(.+)$", line)
+            if not match:
+                continue
+            args = match.group(1).strip()
+            if args.startswith("["):
+                try:
+                    values = json.loads(args)
+                except json.JSONDecodeError:
+                    continue
+                sources = values[:-1]
+            else:
+                parts = shlex.split(args)
+                if any(part.startswith("--from") for part in parts):
+                    continue
+                parts = [part for part in parts if not part.startswith("--")]
+                sources = parts[:-1]
+            for source in sources:
+                if source.startswith(("http://", "https://", "$")):
+                    continue
+                source_path = app_dir / source
+                if not list(app_dir.glob(source)) and not source_path.exists():
+                    missing.append(source)
+        return list(dict.fromkeys(missing))
 
     @classmethod
     def _detect_node_build_plan(cls, app_dir: Path, component_type: str, framework: str = "unknown") -> BuildPlan:
