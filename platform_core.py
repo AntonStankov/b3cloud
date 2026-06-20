@@ -2843,11 +2843,29 @@ class PlatformCore:
     ) -> None:
         package_json = app_dir / "package.json"
         package_lock = app_dir / "package-lock.json"
-        if not package_json.exists() or not package_lock.exists():
+        if not package_json.exists():
             return
 
         try:
             package_data = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+
+        package_manager = str(package_data.get("packageManager") or "").strip().lower()
+        pnpm_lock = app_dir / "pnpm-lock.yaml"
+        if pnpm_lock.exists() and not package_lock.exists() and not package_manager:
+            PlatformCore._ignore_node_lockfile(
+                pnpm_lock,
+                status_callback,
+                "Detected pnpm-lock.yaml without packageManager in package.json; ignoring pnpm lockfile for this build "
+                "so Paketo can use npm install. Add packageManager if this project must be built with pnpm.",
+            )
+            return
+
+        if not package_lock.exists():
+            return
+
+        try:
             lock_data = json.loads(package_lock.read_text())
         except (OSError, json.JSONDecodeError):
             return
@@ -2964,6 +2982,22 @@ class PlatformCore:
             ignored_path = app_dir / f"package-lock.b3cloud-ignored.{counter}.json"
             counter += 1
         package_lock.replace(ignored_path)
+        PlatformCore._emit_status(status_callback, message)
+
+    @staticmethod
+    def _ignore_node_lockfile(
+        lockfile: Path,
+        status_callback: Optional[Callable[[str], None]],
+        message: str,
+    ) -> None:
+        if not lockfile.exists():
+            return
+        ignored_path = lockfile.with_name(f"{lockfile.name}.b3cloud-ignored")
+        counter = 1
+        while ignored_path.exists():
+            ignored_path = lockfile.with_name(f"{lockfile.name}.b3cloud-ignored.{counter}")
+            counter += 1
+        lockfile.replace(ignored_path)
         PlatformCore._emit_status(status_callback, message)
 
     @staticmethod
