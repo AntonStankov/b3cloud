@@ -131,14 +131,6 @@ export function BlueprintPanel({ service, selectedDependency = null, services = 
             )}
           </div>
         )}
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-white/60">Build command</span>
-          <input value={service.buildCommand ?? ""} onChange={(event) => onChange(service.id, { buildCommand: event.target.value })} placeholder="npm run build" className="w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 font-mono text-sm text-white outline-none" />
-        </label>
-        <label className="block">
-          <span className="mb-2 block text-sm font-medium text-white/60">Output directory</span>
-          <input value={service.outputDirectory ?? ""} onChange={(event) => onChange(service.id, { outputDirectory: event.target.value })} placeholder="dist / .next / build" className="w-full rounded-2xl border border-white/5 bg-white/[0.04] px-4 py-3 font-mono text-sm text-white outline-none" />
-        </label>
         <div>
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-medium text-white/60">Instance size</span>

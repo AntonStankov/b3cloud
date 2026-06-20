@@ -91,8 +91,6 @@ export interface DetectedService {
   port?: number;
   confidence: "high" | "medium" | "low";
   framework?: string;
-  buildCommand?: string;
-  outputDirectory?: string;
   env: EnvVarPair[];
   instanceSize: InstanceSize;
   monthlyEstimateUsd: number;
