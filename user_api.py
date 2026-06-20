@@ -15,8 +15,9 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 from urllib.parse import quote, urlencode
 from urllib import error as urlerror
 from urllib import request as urlrequest
@@ -65,6 +66,10 @@ class AppDeployIn(BaseModel):
     github_token: Optional[str] = None
     ci_cd_enabled: bool = True
     ci_cd_branch: Optional[str] = None
+    ci_cd_before_sha: Optional[str] = None
+    ci_cd_after_sha: Optional[str] = None
+    ci_cd_parent_job_id: Optional[str] = None
+    ci_cd_changed_paths: Optional[List[str]] = None
     env: Dict[str, str] = Field(default_factory=dict)
     git_revision: str = "main"
     port: int = 8080
@@ -620,7 +625,8 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             for component in components
         ]
         same_origin_public = False
-        component_communications = _detect_deploy_component_communications(job_id, payload, components)
+        repository_analysis = _analyze_repository_for_deploy(job_id, payload, components)
+        component_communications = _communications_from_analysis(repository_analysis)
         frontend_api_targets = _frontend_api_targets(component_defaults_list, component_communications)
         communication_env_by_path = {
             item["component_path"]: _component_communication_env(
@@ -631,19 +637,55 @@ def _run_deploy_job(job_id: str, payload: AppDeployIn, defaults: Dict[str, str])
             )
             for item in component_defaults_list
         }
-        for component in components:
-            component_defaults = svc.component_defaults(defaults, component, multi_component)
+        deploy_items: List[tuple[int, ComponentDeployIn, Dict[str, str]]] = []
+        for index, component in enumerate(components):
+            component_defaults = component_defaults_list[index]
             if same_origin_public:
                 component_defaults["deploy_public"] = False
-            svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
-            result = _deploy_component(
-                job_id,
-                payload,
-                component,
-                component_defaults,
-                communication_env_by_path.get(component_defaults["component_path"], {}),
-            )
-            results.append(result)
+            previous_result = _previous_component_result(payload.ci_cd_parent_job_id, component_defaults["app_name"])
+            if _can_skip_component_for_cicd(payload, component, previous_result):
+                svc.jobs.append_log(
+                    job_id,
+                    f"Skipping unchanged component {component_defaults['component_name']} from {component.path}; reusing previous deployment.",
+                )
+                skipped_result = dict(previous_result or {})
+                skipped_result["skipped"] = True
+                skipped_result["skip_reason"] = "No files changed under this component path in the CI/CD push."
+                results.append(skipped_result)
+                continue
+            deploy_items.append((index, component, component_defaults))
+
+        if deploy_items:
+            max_workers = _deploy_parallelism(len(deploy_items))
+            if max_workers > 1:
+                svc.jobs.append_log(job_id, f"Deploying {len(deploy_items)} changed component(s) with parallelism {max_workers}.")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_item = {}
+                for index, component, component_defaults in deploy_items:
+                    svc.jobs.append_log(job_id, f"Deploying component {component_defaults['component_name']} from {component.path}.")
+                    future = executor.submit(
+                        _deploy_component,
+                        job_id,
+                        payload,
+                        component,
+                        component_defaults,
+                        communication_env_by_path.get(component_defaults["component_path"], {}),
+                        repository_analysis,
+                    )
+                    future_to_item[future] = (index, component_defaults)
+                completed: List[tuple[int, Dict[str, object]]] = []
+                for future in as_completed(future_to_item):
+                    index, component_defaults = future_to_item[future]
+                    try:
+                        completed.append((index, future.result()))
+                    except Exception as exc:
+                        svc.jobs.append_log(
+                            job_id,
+                            f"Component {component_defaults['component_name']} failed: {exc}",
+                        )
+                        raise
+                results.extend(result for _, result in sorted(completed, key=lambda item: item[0]))
+        results.sort(key=lambda result: _component_result_order(result, component_defaults_list))
         frontend_api_routes = _ensure_frontend_api_routes(job_id, component_defaults_list, frontend_api_targets)
         shared_route = None
         if same_origin_public:
@@ -691,6 +733,7 @@ def _deploy_component(
     component: ComponentDeployIn,
     defaults: Dict[str, str],
     communication_env: Dict[str, str],
+    repository_analysis: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     service_requirements: List[ServiceRequirement] = []
     requested_types = {
@@ -700,12 +743,15 @@ def _deploy_component(
     }
     if component.auto_detect_services and component.type in {"backend", "worker"}:
         svc.jobs.append_log(job_id, f"Analyzing {component.path} for backing service requirements.")
-        analysis = svc.core.analyze_repository(
-            payload.github_url,
-            git_revision=payload.git_revision,
-            github_token=payload.github_token,
-            status_callback=lambda message: svc.jobs.append_log(job_id, message),
-        )
+        if repository_analysis is not None:
+            analysis = repository_analysis
+        else:
+            analysis = svc.core.analyze_repository(
+                payload.github_url,
+                git_revision=payload.git_revision,
+                github_token=payload.github_token,
+                status_callback=lambda message: svc.jobs.append_log(job_id, message),
+            )
         component_analysis = next(
             (
                 item
@@ -797,6 +843,100 @@ def _deploy_component(
         }
     )
     return result
+
+
+def _deploy_parallelism(component_count: int) -> int:
+    try:
+        configured = int(os.getenv("B3CLOUD_MAX_PARALLEL_COMPONENT_BUILDS", "2"))
+    except ValueError:
+        configured = 2
+    return max(1, min(component_count, configured))
+
+
+def _previous_component_result(parent_job_id: Optional[str], app_name: str) -> Optional[Dict[str, object]]:
+    if not parent_job_id:
+        return None
+    parent_job = svc.jobs.get_job(parent_job_id)
+    if not parent_job:
+        return None
+    result = parent_job.get("result")
+    if isinstance(result, dict):
+        components = result.get("components")
+        if isinstance(components, list):
+            for item in components:
+                if isinstance(item, dict) and str(item.get("app_name") or "") == app_name:
+                    return item
+        if str(result.get("app_name") or "") == app_name:
+            return result
+    return None
+
+
+def _can_skip_component_for_cicd(
+    payload: AppDeployIn,
+    component: ComponentDeployIn,
+    previous_result: Optional[Dict[str, object]],
+) -> bool:
+    if not payload.ci_cd_parent_job_id or previous_result is None:
+        return False
+    changed_paths = payload.ci_cd_changed_paths
+    if changed_paths is None:
+        return False
+    changed = set(changed_paths)
+    if _global_repo_change_affects_components(changed):
+        return False
+    return not _component_path_changed(component.path, changed)
+
+
+def _component_path_changed(component_path: str, changed_paths: Set[str]) -> bool:
+    normalized = _normalize_repo_path(component_path)
+    if normalized in {"", "."}:
+        return bool(changed_paths)
+    prefix = f"{normalized}/"
+    return any(path == normalized or path.startswith(prefix) for path in changed_paths)
+
+
+def _global_repo_change_affects_components(changed_paths: Set[str]) -> bool:
+    global_files = {
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "yarn.lock",
+        "turbo.json",
+        "nx.json",
+        "lerna.json",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "go.work",
+        "go.sum",
+        "requirements.txt",
+        "pyproject.toml",
+        "poetry.lock",
+        "Dockerfile",
+        "Procfile",
+    }
+    for path in changed_paths:
+        if "/" not in path and path in global_files:
+            return True
+        if path.startswith((".github/", "buildSrc/", "gradle/")):
+            return True
+    return False
+
+
+def _normalize_repo_path(path: str) -> str:
+    cleaned = str(path or ".").strip().replace("\\", "/").strip("/")
+    return "." if cleaned in {"", "."} else cleaned
+
+
+def _component_result_order(result: Dict[str, object], component_defaults_list: List[Dict[str, str]]) -> int:
+    app_name = str(result.get("app_name") or "")
+    for index, defaults in enumerate(component_defaults_list):
+        if str(defaults.get("app_name") or "") == app_name:
+            return index
+    return len(component_defaults_list)
 
 
 def _managed_env_names_for_services(service_types: Iterable[str]) -> set[str]:
@@ -993,21 +1133,40 @@ def _detect_deploy_component_communications(
     payload: AppDeployIn,
     components: List[ComponentDeployIn],
 ) -> List[Dict[str, object]]:
-    if len(components) < 2:
-        return []
+    analysis = _analyze_repository_for_deploy(job_id, payload, components)
+    return _communications_from_analysis(analysis)
+
+
+def _analyze_repository_for_deploy(
+    job_id: str,
+    payload: AppDeployIn,
+    components: List[ComponentDeployIn],
+) -> Optional[Dict[str, object]]:
+    needs_analysis = len(components) > 1 or any(
+        component.auto_detect_services and component.type in {"backend", "worker"}
+        for component in components
+    )
+    if not needs_analysis:
+        return None
     try:
-        svc.jobs.append_log(job_id, "Analyzing component communication paths for automatic routing.")
-        analysis = svc.core.analyze_repository(
+        svc.jobs.append_log(job_id, "Analyzing repository once for services and component communication.")
+        return svc.core.analyze_repository(
             payload.github_url,
             git_revision=payload.git_revision,
             github_token=payload.github_token,
             status_callback=lambda message: svc.jobs.append_log(job_id, message),
         )
-        communications = analysis.get("communications", [])
-        if isinstance(communications, list):
-            return [item for item in communications if isinstance(item, dict)]
     except Exception as exc:
-        svc.jobs.append_log(job_id, f"Communication analysis skipped; falling back to primary backend routing: {exc}")
+        svc.jobs.append_log(job_id, f"Repository analysis skipped; deployment will use requested settings and fallback routing: {exc}")
+        return {}
+
+
+def _communications_from_analysis(analysis: Optional[Dict[str, object]]) -> List[Dict[str, object]]:
+    if not analysis:
+        return []
+    communications = analysis.get("communications", [])
+    if isinstance(communications, list):
+        return [item for item in communications if isinstance(item, dict)]
     return []
 
 
@@ -1365,18 +1524,21 @@ async def v1_github_webhook(
     if not full_name or not branch or branch == ref:
         return {"status": "ignored", "reason": "unsupported ref or repository"}
 
+    before_sha = str(payload.get("before") or "")
     commit_sha = str(payload.get("after") or "")
     matches = _matching_cicd_jobs(full_name, branch)
+    changed_paths = _github_changed_paths(full_name, before_sha, commit_sha)
     started = [
         next_job
         for job in matches
-        if (next_job := _start_cicd_redeploy(job, branch, commit_sha, x_github_delivery)) is not None
+        if (next_job := _start_cicd_redeploy(job, branch, before_sha, commit_sha, changed_paths, x_github_delivery)) is not None
     ]
     return {
         "status": "accepted",
         "repository": full_name,
         "branch": branch,
         "commit": commit_sha,
+        "changed_paths": len(changed_paths) if changed_paths is not None else None,
         "matched_projects": len(matches),
         "started_jobs": [job["job_id"] for job in started],
     }
@@ -1935,12 +2097,58 @@ def _matching_cicd_jobs(repo_full_name: str, branch: str) -> List[Dict[str, obje
     return list(latest_by_project.values())
 
 
-def _start_cicd_redeploy(job: Dict[str, object], branch: str, commit_sha: str, delivery_id: str) -> Optional[Dict[str, object]]:
+def _github_changed_paths(repo_full_name: str, before_sha: str, after_sha: str) -> Optional[List[str]]:
+    zero_sha = "0" * 40
+    if not before_sha or not after_sha or before_sha == zero_sha or after_sha == zero_sha:
+        return None
+    token = os.getenv("B3CLOUD_GITHUB_PAT", "")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "B3Cloud",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"https://api.github.com/repos/{repo_full_name}/compare/{before_sha}...{after_sha}"
+    try:
+        req = urlrequest.Request(url, headers=headers)
+        with urlrequest.urlopen(req, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+    files = payload.get("files")
+    if not isinstance(files, list):
+        return None
+    paths: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename") or "").strip()
+        previous = str(item.get("previous_filename") or "").strip()
+        if filename:
+            paths.add(_normalize_repo_path(filename))
+        if previous:
+            paths.add(_normalize_repo_path(previous))
+    return sorted(paths)
+
+
+def _start_cicd_redeploy(
+    job: Dict[str, object],
+    branch: str,
+    before_sha: str,
+    commit_sha: str,
+    changed_paths: Optional[List[str]],
+    delivery_id: str,
+) -> Optional[Dict[str, object]]:
     config_payload = job.get("deployment_config")
     if not isinstance(config_payload, dict):
         return None
     config_payload = dict(config_payload)
     config_payload["ci_cd_branch"] = branch
+    config_payload["ci_cd_before_sha"] = before_sha or None
+    config_payload["ci_cd_after_sha"] = commit_sha or None
+    config_payload["ci_cd_parent_job_id"] = str(job.get("job_id") or "") or None
+    config_payload["ci_cd_changed_paths"] = changed_paths
     if commit_sha:
         config_payload["git_revision"] = commit_sha
     else:
@@ -1957,6 +2165,16 @@ def _start_cicd_redeploy(job: Dict[str, object], branch: str, commit_sha: str, d
         f"CI/CD redeploy triggered by GitHub push delivery {delivery_id or 'unknown'} on branch {branch}"
         + (f" at commit {commit_sha[:12]}." if commit_sha else "."),
     )
+    if changed_paths is None:
+        svc.jobs.append_log(str(next_job["job_id"]), "Changed file list unavailable; rebuilding all selected components.")
+    elif changed_paths:
+        preview = ", ".join(changed_paths[:20])
+        svc.jobs.append_log(
+            str(next_job["job_id"]),
+            f"Detected {len(changed_paths)} changed file(s): {preview}" + (" ..." if len(changed_paths) > 20 else ""),
+        )
+    else:
+        svc.jobs.append_log(str(next_job["job_id"]), "No changed files detected in push; unchanged components will be reused.")
     return next_job
 
 @app.post("/apps/deploy")

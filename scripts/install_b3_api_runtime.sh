@@ -180,6 +180,9 @@ else
   log "no stale pack volumes found"
 fi
 
+docker pull paketobuildpacks/builder-jammy-base:latest || true
+docker pull paketobuildpacks/run-jammy-base:latest || true
+
 log "disk after cleanup: $(df -h / | awk 'NR==2 {print $4 " free of " $2 " (" $5 " used)"}')"
 docker system df || true
 EOF

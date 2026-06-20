@@ -308,16 +308,15 @@ class PlatformCore:
         github_pat = github_token or os.getenv("B3CLOUD_GITHUB_PAT", "")
         with tempfile.TemporaryDirectory(prefix="b3cloud-analyze-") as tmpdir:
             repo_dir = Path(tmpdir) / "src"
-            try:
-                self._emit_status(status_callback, f"Cloning source repo {github_url} for service detection.")
-                self._run_command(["git", "clone", github_url, str(repo_dir)])
-            except RuntimeError:
-                clone_url = self._github_clone_url(github_url, github_pat)
-                if clone_url == github_url:
-                    raise
-                self._emit_status(status_callback, "Retrying analysis clone with GitHub token.")
-                self._run_command(["git", "clone", clone_url, str(repo_dir)])
-            actual_revision = self._checkout_git_revision(repo_dir, git_revision, status_callback=status_callback)
+            self._emit_status(status_callback, f"Cloning source repo {github_url} for service detection.")
+            actual_revision = self._clone_git_source(
+                github_url,
+                repo_dir,
+                git_revision,
+                github_pat=github_pat,
+                status_callback=status_callback,
+                retry_message="Retrying analysis clone with GitHub token.",
+            )
             components = self._detect_deployable_components(repo_dir)
             app_dir = repo_dir / components[0].path if components else self._detect_app_path(repo_dir)
             requirements = self._detect_service_requirements(app_dir)
@@ -344,8 +343,20 @@ class PlatformCore:
                 self._run_command(["git", "-C", str(repo_dir), "checkout", requested])
                 return requested
             except RuntimeError as exc:
+                if self._looks_like_git_sha(requested):
+                    try:
+                        self._run_command(["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", requested])
+                        self._run_command(["git", "-C", str(repo_dir), "checkout", "FETCH_HEAD"])
+                        return requested
+                    except RuntimeError:
+                        raise exc
                 if requested not in {"main", "master"}:
-                    raise
+                    try:
+                        self._run_command(["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", requested])
+                        self._run_command(["git", "-C", str(repo_dir), "checkout", "FETCH_HEAD"])
+                        return requested
+                    except RuntimeError:
+                        raise exc
                 self._emit_status(
                     status_callback,
                     f"Git revision '{requested}' was not found; falling back to the repository default branch.",
@@ -384,6 +395,49 @@ class PlatformCore:
             except RuntimeError:
                 continue
         return ""
+
+    def _clone_git_source(
+        self,
+        github_url: str,
+        repo_dir: Path,
+        git_revision: str,
+        github_pat: str = "",
+        status_callback: Optional[Callable[[str], None]] = None,
+        retry_message: str = "Retrying clone with GitHub token.",
+    ) -> str:
+        clone_urls = [github_url]
+        token_url = self._github_clone_url(github_url, github_pat)
+        if token_url != github_url:
+            clone_urls.append(token_url)
+
+        last_error: Optional[RuntimeError] = None
+        for index, clone_url in enumerate(clone_urls):
+            if repo_dir.exists():
+                shutil.rmtree(repo_dir, ignore_errors=True)
+            try:
+                if index > 0:
+                    self._emit_status(status_callback, retry_message)
+                self._run_command(
+                    [
+                        "git",
+                        "clone",
+                        "--filter=blob:none",
+                        "--no-checkout",
+                        clone_url,
+                        str(repo_dir),
+                    ]
+                )
+                return self._checkout_git_revision(repo_dir, git_revision, status_callback=status_callback)
+            except RuntimeError as exc:
+                last_error = exc
+                continue
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Could not clone repository {github_url}")
+
+    @staticmethod
+    def _looks_like_git_sha(value: str) -> bool:
+        return bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", value.strip()))
 
     @staticmethod
     def _validate_deployment_request(req: DeploymentRequest) -> None:
@@ -579,16 +633,15 @@ class PlatformCore:
             self._ensure_registry_seed_image(req, env)
 
             repo_dir = Path(tmpdir) / "src"
-            try:
-                self._emit_status(status_callback, f"Cloning source repo {req.github_url}.")
-                self._run_command(["git", "clone", req.github_url, str(repo_dir)])
-            except RuntimeError:
-                clone_url = self._github_clone_url(req.github_url, github_pat)
-                if clone_url == req.github_url:
-                    raise
-                self._emit_status(status_callback, "Retrying clone with GitHub token.")
-                self._run_command(["git", "clone", clone_url, str(repo_dir)])
-            self._checkout_git_revision(repo_dir, req.git_revision, status_callback=status_callback)
+            self._emit_status(status_callback, f"Cloning source repo {req.github_url}.")
+            self._clone_git_source(
+                req.github_url,
+                repo_dir,
+                req.git_revision,
+                github_pat=github_pat,
+                status_callback=status_callback,
+                retry_message="Retrying clone with GitHub token.",
+            )
             app_dir = self._safe_component_path(repo_dir, req.app_path)
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
@@ -606,6 +659,8 @@ class PlatformCore:
                 str(app_dir),
                 "--builder",
                 self.PACK_BUILDER_IMAGE,
+                "--cache-image",
+                self._build_cache_image_ref(req.registry_repo, req.app_name),
                 "--publish",
                 "--verbose",
             ]
@@ -713,6 +768,12 @@ class PlatformCore:
         repo = registry_repo.strip().rstrip("/").lower()
         name = sanitize_name(app_name)
         return f"{repo}/{name}:{tag}"
+
+    @staticmethod
+    def _build_cache_image_ref(registry_repo: str, app_name: str) -> str:
+        repo = registry_repo.strip().rstrip("/").lower()
+        name = sanitize_name(app_name)
+        return f"{repo}/{name}:build-cache"
 
     def _create_or_update_deployment(
         self,
