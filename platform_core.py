@@ -342,7 +342,7 @@ class PlatformCore:
             components = self._detect_deployable_components(repo_dir)
             app_dir = repo_dir / components[0].path if components else self._detect_app_path(repo_dir)
             requirements = self._detect_service_requirements(app_dir)
-            communications = self._detect_component_communications(components)
+            communications = self._detect_component_communications(components, repo_dir)
             return {
                 "github_url": github_url,
                 "git_revision": actual_revision,
@@ -3270,11 +3270,15 @@ class PlatformCore:
         return defaults
 
     @staticmethod
-    def _detect_component_communications(components: list[DeployableComponent]) -> list[ComponentCommunication]:
+    def _detect_component_communications(components: list[DeployableComponent], repo_dir: Optional[Path] = None) -> list[ComponentCommunication]:
         if len(components) < 2:
             return []
 
         links: Dict[tuple[str, str], ComponentCommunication] = {}
+        component_dirs = {
+            component.path: (repo_dir / component.path if repo_dir and component.path != "." else repo_dir)
+            for component in components
+        }
 
         def component_key(component: DeployableComponent) -> str:
             raw = component.name if component.name != "app" else Path(component.path).name
@@ -3330,6 +3334,34 @@ class PlatformCore:
                         evidence.extend(declared_env[name].evidence[:2] or [declared_env[name].source])
                     add_link(source, target, matches, "high", evidence or [f"{source.name} declares {', '.join(matches)}"])
 
+        if repo_dir:
+            route_index = {
+                component.path: PlatformCore._extract_component_routes(component_dirs.get(component.path))
+                for component in components
+            }
+            outgoing_index = {
+                component.path: PlatformCore._extract_outgoing_service_routes(component_dirs.get(component.path))
+                for component in components
+            }
+
+            for source in components:
+                outgoing_routes = outgoing_index.get(source.path, [])
+                if not outgoing_routes:
+                    continue
+                for target in components:
+                    if source.path == target.path:
+                        continue
+                    target_routes = route_index.get(target.path, [])
+                    route_matches = PlatformCore._match_service_routes(outgoing_routes, target_routes)
+                    if route_matches:
+                        add_link(
+                            source,
+                            target,
+                            candidate_env_names(target, source),
+                            "high",
+                            route_matches,
+                        )
+
         frontend_components = [component for component in components if component.type == "frontend"]
         backend_components = [component for component in components if component.type == "backend"]
         if frontend_components and backend_components:
@@ -3347,6 +3379,120 @@ class PlatformCore:
                     )
 
         return sorted(links.values(), key=lambda link: (link.source_path, link.target_path))
+
+    @staticmethod
+    def _extract_component_routes(app_dir: Optional[Path]) -> list[str]:
+        if not app_dir or not app_dir.exists():
+            return []
+
+        routes: list[str] = []
+
+        def add(value: str) -> None:
+            route = PlatformCore._normalize_route(value)
+            if route:
+                routes.append(route)
+
+        for path in PlatformCore._iter_small_source_files(app_dir):
+            try:
+                content = path.read_text(errors="ignore")
+            except OSError:
+                continue
+            suffix = path.suffix.lower()
+            if suffix == ".java":
+                if "@RegisterRestClient" in content:
+                    continue
+                for match in re.finditer(r"@Path\s*\(\s*\"([^\"]+)\"", content):
+                    add(match.group(1))
+            elif suffix == ".php":
+                for match in re.finditer(r"Route::(?:get|post|put|patch|delete|any|match)\s*\(\s*['\"]([^'\"]+)['\"]", content):
+                    add(match.group(1))
+            elif suffix == ".py":
+                for match in re.finditer(r"@(?:app|router)\.(?:get|post|put|patch|delete|api_route)\s*\(\s*['\"]([^'\"]+)['\"]", content):
+                    add(match.group(1))
+            elif suffix in {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}:
+                for match in re.finditer(r"\.(?:get|post|put|patch|delete|all)\s*\(\s*['\"]([^'\"]+)['\"]", content):
+                    add(match.group(1))
+        return list(dict.fromkeys(routes))
+
+    @staticmethod
+    def _extract_outgoing_service_routes(app_dir: Optional[Path]) -> list[str]:
+        if not app_dir or not app_dir.exists():
+            return []
+
+        routes: list[str] = []
+
+        def add(value: str) -> None:
+            route = PlatformCore._normalize_route(value)
+            if route:
+                routes.append(route)
+
+        for path in PlatformCore._iter_small_source_files(app_dir):
+            try:
+                content = path.read_text(errors="ignore")
+            except OSError:
+                continue
+            suffix = path.suffix.lower()
+            if suffix == ".java":
+                if "@RegisterRestClient" in content or "@RestClient" in content:
+                    for match in re.finditer(r"@Path\s*\(\s*\"([^\"]+)\"", content):
+                        add(match.group(1))
+                    for match in re.finditer(r"configKey\s*=\s*\"([^\"]+)\"", content):
+                        add(match.group(1))
+            if re.search(r"\b(fetch|axios|http\.|Http::|RestClient|WebClient|requests\.|urllib|curl_exec)\b", content):
+                for match in re.finditer(r"['\"](?:https?://[^/'\"]+)?(/[^'\"`\\s]+)['\"]", content):
+                    add(match.group(1))
+                for match in re.finditer(r"import\.meta\.env\.([A-Z_][A-Z0-9_]*)|process\.env\.([A-Z_][A-Z0-9_]*)|System\.getenv\(\s*\"([A-Z_][A-Z0-9_]*)\"", content):
+                    add(next(group for group in match.groups() if group))
+        return list(dict.fromkeys(routes))
+
+    @staticmethod
+    def _match_service_routes(outgoing_routes: list[str], target_routes: list[str]) -> list[str]:
+        evidence: list[str] = []
+        target_tokens = {PlatformCore._route_tail(route) for route in target_routes if PlatformCore._route_tail(route)}
+        target_tokens.update(route for route in target_routes if route)
+        for outgoing in outgoing_routes:
+            outgoing_tail = PlatformCore._route_tail(outgoing)
+            if not outgoing_tail:
+                continue
+            if outgoing_tail in target_tokens or any(outgoing.endswith(target) or target.endswith(outgoing_tail) for target in target_routes):
+                evidence.append(f"Outbound route/config '{outgoing}' matches target route '{outgoing_tail}'.")
+        return list(dict.fromkeys(evidence))[:8]
+
+    @staticmethod
+    def _normalize_route(value: str) -> str:
+        route = value.strip().strip("'\"`")
+        if not route:
+            return ""
+        route = re.sub(r"\{[^}]+\}", ":param", route)
+        route = re.sub(r"<[^>]+>", ":param", route)
+        route = re.sub(r"//+", "/", route)
+        return route.strip("/")
+
+    @staticmethod
+    def _route_tail(route: str) -> str:
+        route = PlatformCore._normalize_route(route)
+        parts = [part for part in route.split("/") if part and not part.startswith(":")]
+        return parts[-1] if parts else route
+
+    @staticmethod
+    def _iter_small_source_files(app_dir: Path) -> list[Path]:
+        ignored_dirs = {".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "dist", "build", ".next", "target", "storage"}
+        suffixes = {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".php", ".java", ".kt", ".cs", ".yml", ".yaml", ".json", ".properties"}
+        files: list[Path] = []
+        for root, dirs, filenames in os.walk(app_dir):
+            dirs[:] = [directory for directory in dirs if directory not in ignored_dirs]
+            root_path = Path(root)
+            for filename in filenames:
+                path = root_path / filename
+                if path.suffix.lower() not in suffixes:
+                    continue
+                try:
+                    if path.stat().st_size > 512_000:
+                        continue
+                except OSError:
+                    continue
+                files.append(path)
+        return files[:400]
 
     @staticmethod
     def _emit_status(status_callback: Optional[Callable[[str], None]], message: str) -> None:
