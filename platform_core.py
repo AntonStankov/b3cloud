@@ -2211,6 +2211,11 @@ class PlatformCore:
             except OSError:
                 return ""
 
+        if component_type == "frontend":
+            build_plan = PlatformCore._detect_build_plan(app_dir, component_type)
+            if build_plan.runtime_mode == "static":
+                return 8080, "high", ["Static frontend build plan uses the platform NGINX runtime on port 8080."]
+
         env_candidates = [".env.example", ".env.sample", ".env.defaults", "example.env"]
         for filename in env_candidates:
             path = app_dir / filename
@@ -3019,6 +3024,58 @@ class PlatformCore:
             except OSError:
                 return ""
 
+        def finalize() -> list[ServiceRequirement]:
+            requirements: list[ServiceRequirement] = []
+            for service, reasons in evidence.items():
+                unique_reasons = list(dict.fromkeys(reasons))[:8]
+                if not unique_reasons:
+                    continue
+                confidence = "high" if len(unique_reasons) >= 2 or any("dependency" in reason for reason in unique_reasons) else "medium"
+                requirements.append(ServiceRequirement(type=service, confidence=confidence, evidence=unique_reasons))
+            return requirements
+
+        composer_json = app_dir / "composer.json"
+        if composer_json.exists() or (app_dir / "artisan").exists():
+            composer = PlatformCore._read_json_file(composer_json)
+            requires = {**composer.get("require", {}), **composer.get("require-dev", {})} if isinstance(composer, dict) else {}
+            if "laravel/framework" in requires:
+                env_defaults = PlatformCore._read_env_defaults(app_dir)
+                db_connection = env_defaults.get("DB_CONNECTION", "").lower()
+                if db_connection in {"mysql", "mariadb"}:
+                    add("mysql", f".env default DB_CONNECTION={db_connection}")
+                elif db_connection in {"pgsql", "postgres", "postgresql"}:
+                    add("postgres", f".env default DB_CONNECTION={db_connection}")
+                elif db_connection == "mongodb":
+                    add("mongodb", ".env default DB_CONNECTION=mongodb")
+
+                redis_defaults = {
+                    "CACHE_STORE": env_defaults.get("CACHE_STORE", "").lower(),
+                    "QUEUE_CONNECTION": env_defaults.get("QUEUE_CONNECTION", "").lower(),
+                    "SESSION_DRIVER": env_defaults.get("SESSION_DRIVER", "").lower(),
+                    "BROADCAST_CONNECTION": env_defaults.get("BROADCAST_CONNECTION", "").lower(),
+                }
+                redis_users = [f"{key}={value}" for key, value in redis_defaults.items() if value == "redis"]
+                if redis_users:
+                    add("redis", ".env default uses Redis: " + ", ".join(redis_users))
+                return finalize()
+
+        pom_xml = app_dir / "pom.xml"
+        if pom_xml.exists():
+            pom = re.sub(r"<!--.*?-->", "", read_text(pom_xml), flags=re.DOTALL).lower()
+            java_dependency_map = {
+                "postgres": ["quarkus-jdbc-postgresql", "postgresql", "jdbc-postgresql"],
+                "mysql": ["quarkus-jdbc-mysql", "mysql-connector", "mysql-connector-j", "mariadb-java-client", "jdbc-mysql"],
+                "mongodb": ["quarkus-mongodb", "mongodb-driver", "mongodb-driver-sync"],
+                "redis": ["quarkus-redis-client", "lettuce-core", "jedis"],
+                "rabbitmq": ["quarkus-messaging-rabbitmq", "amqp-client"],
+            }
+            for service, markers in java_dependency_map.items():
+                matches = [marker for marker in markers if marker in pom]
+                if matches:
+                    add(service, f"pom.xml dependencies: {', '.join(matches)}")
+            if any(evidence.values()):
+                return finalize()
+
         package_json = app_dir / "package.json"
         if package_json.exists():
             try:
@@ -3096,14 +3153,31 @@ class PlatformCore:
                     if hits:
                         add(service, f"{rel}: {', '.join(sorted(set(hits))[:4])}")
 
-        requirements: list[ServiceRequirement] = []
-        for service, reasons in evidence.items():
-            unique_reasons = list(dict.fromkeys(reasons))[:8]
-            if not unique_reasons:
+        return finalize()
+
+    @staticmethod
+    def _read_env_defaults(app_dir: Path) -> Dict[str, str]:
+        defaults: Dict[str, str] = {}
+        for filename in (".env.example", ".env.sample", ".env.defaults", "example.env"):
+            path = app_dir / filename
+            if not path.exists():
                 continue
-            confidence = "high" if len(unique_reasons) >= 2 else "medium"
-            requirements.append(ServiceRequirement(type=service, confidence=confidence, evidence=unique_reasons))
-        return requirements
+            try:
+                lines = path.read_text(errors="ignore").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                match = re.match(r"^(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*)$", stripped)
+                if not match:
+                    continue
+                value = match.group(2).strip().strip("'\"")
+                if "#" in value:
+                    value = value.split("#", 1)[0].strip().strip("'\"")
+                defaults.setdefault(match.group(1), value)
+        return defaults
 
     @staticmethod
     def _detect_component_communications(components: list[DeployableComponent]) -> list[ComponentCommunication]:
