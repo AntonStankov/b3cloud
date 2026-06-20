@@ -25,6 +25,17 @@ export interface ServiceRequirement {
   provision: boolean;
 }
 
+export interface BuildPlan {
+  runtime_mode: "static" | "server" | "worker" | "frontend" | "backend" | "unknown" | string;
+  build_command: string;
+  start_command: string;
+  output_dir: string;
+  build_env: Record<string, string>;
+  confidence: "high" | "medium" | "low" | string;
+  evidence: string[];
+  warnings: string[];
+}
+
 export interface AnalyzedComponent {
   name: string;
   path: string;
@@ -40,6 +51,7 @@ export interface AnalyzedComponent {
   language?: string;
   framework?: string;
   confidence?: "high" | "medium" | "low" | string;
+  build_plan?: BuildPlan;
   warnings?: string[];
 }
 

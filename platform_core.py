@@ -76,6 +76,26 @@ class EnvRequirement:
 
 
 @dataclass
+class BuildPlan:
+    runtime_mode: str
+    build_command: str = ""
+    start_command: str = ""
+    output_dir: str = ""
+    build_env: Dict[str, str] = None
+    confidence: str = "medium"
+    evidence: list[str] = None
+    warnings: list[str] = None
+
+    def __post_init__(self) -> None:
+        if self.build_env is None:
+            self.build_env = {}
+        if self.evidence is None:
+            self.evidence = []
+        if self.warnings is None:
+            self.warnings = []
+
+
+@dataclass
 class DeployableComponent:
     name: str
     path: str
@@ -90,6 +110,7 @@ class DeployableComponent:
     language: str = "unknown"
     framework: str = "unknown"
     confidence: str = "medium"
+    build_plan: Optional[BuildPlan] = None
     warnings: list[str] = None
 
     def __post_init__(self) -> None:
@@ -646,6 +667,18 @@ class PlatformCore:
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
             self._emit_status(status_callback, f"Using app path: {app_dir}.")
+            build_plan = self._detect_build_plan(app_dir, "backend")
+            self._emit_status(
+                status_callback,
+                "Build plan: "
+                f"runtime={build_plan.runtime_mode}, "
+                f"build={build_plan.build_command or 'buildpack default'}, "
+                f"start={build_plan.start_command or 'buildpack default'}, "
+                f"output={build_plan.output_dir or 'buildpack default'}, "
+                f"confidence={build_plan.confidence}.",
+            )
+            for warning in build_plan.warnings:
+                self._emit_status(status_callback, f"Build plan warning: {warning}")
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
             self._prepare_python_start_command(app_dir, status_callback=status_callback)
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
@@ -664,7 +697,7 @@ class PlatformCore:
                 "--publish",
                 "--verbose",
             ]
-            inferred_build_env = self._infer_build_env(app_dir)
+            inferred_build_env = {**build_plan.build_env, **self._infer_build_env(app_dir)}
             if inferred_build_env.get("BP_WEB_SERVER") == "nginx":
                 self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
             self._prepare_node_lockfile(app_dir, status_callback=status_callback)
@@ -1988,10 +2021,11 @@ class PlatformCore:
             name = sanitize_name(path.name if rel != "." else "app") or "app"
             component_type, evidence = cls._classify_component(path)
             language, framework, confidence, metadata_warnings = cls._component_metadata(path, component_type, evidence)
+            build_plan = cls._detect_build_plan(path, component_type, language, framework)
             port, port_confidence, port_evidence = cls._detect_component_port(path, component_type)
             env_requirements = cls._detect_env_requirements(path)
             services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
-            warnings = list(metadata_warnings)
+            warnings = [*metadata_warnings, *build_plan.warnings]
             if port_confidence == "default":
                 warnings.append("No explicit port was found; using the platform default port 8080. Confirm this before deploying.")
             if component_type in {"backend", "worker"} and not services:
@@ -2011,6 +2045,7 @@ class PlatformCore:
                     language=language,
                     framework=framework,
                     confidence=confidence if port_confidence != "default" else "low",
+                    build_plan=build_plan,
                     warnings=warnings,
                 )
             )
@@ -2389,54 +2424,162 @@ class PlatformCore:
         except (OSError, json.JSONDecodeError):
             return {}
 
+    @classmethod
+    def _detect_build_plan(
+        cls,
+        app_dir: Path,
+        component_type: str,
+        language: str = "unknown",
+        framework: str = "unknown",
+    ) -> BuildPlan:
+        if (app_dir / "package.json").exists():
+            return cls._detect_node_build_plan(app_dir, component_type, framework)
+        if (app_dir / "pom.xml").exists() or (app_dir / "build.gradle").exists() or (app_dir / "build.gradle.kts").exists():
+            env = cls._infer_java_build_env(app_dir)
+            evidence = ["Java build file detected."]
+            if "BP_MAVEN_BUILT_ARTIFACT" in env:
+                evidence.append("Quarkus app detected; using target/quarkus-app/quarkus-run.jar.")
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command="maven/gradle buildpack default",
+                build_env=env,
+                confidence="high" if framework not in {"Java", "unknown"} else "medium",
+                evidence=evidence,
+            )
+        if (app_dir / "requirements.txt").exists() or (app_dir / "pyproject.toml").exists():
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command="python buildpack default",
+                start_command="Procfile/generated process when framework is detected",
+                confidence="medium",
+                evidence=["Python dependency file detected."],
+            )
+        if (app_dir / "composer.json").exists() or (app_dir / "artisan").exists() or (app_dir / "public/index.php").exists():
+            warnings = []
+            if (app_dir / "Dockerfile").exists():
+                warnings.append("Dockerfile detected. Current deployment uses Buildpacks, so Dockerfile instructions are not executed.")
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command="PHP/Composer buildpack default",
+                start_command="PHP buildpack default",
+                confidence="medium",
+                evidence=["PHP Composer or web entrypoint detected."],
+                warnings=warnings,
+            )
+        if (app_dir / "go.mod").exists():
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command="go buildpack default",
+                confidence="medium",
+                evidence=["Go module detected."],
+            )
+        return BuildPlan(
+            runtime_mode=component_type if component_type in {"frontend", "backend", "worker"} else "unknown",
+            confidence="low",
+            evidence=["No precise build plan could be inferred."],
+            warnings=["Build plan confidence is low; Buildpacks will use default detection."],
+        )
+
+    @classmethod
+    def _detect_node_build_plan(cls, app_dir: Path, component_type: str, framework: str = "unknown") -> BuildPlan:
+        package = cls._read_json_file(app_dir / "package.json")
+        scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+        dependencies = {
+            **(package.get("dependencies", {}) if isinstance(package.get("dependencies"), dict) else {}),
+            **(package.get("devDependencies", {}) if isinstance(package.get("devDependencies"), dict) else {}),
+            **(package.get("optionalDependencies", {}) if isinstance(package.get("optionalDependencies"), dict) else {}),
+        }
+        build_script = str(scripts.get("build") or "").strip()
+        start_script = str(scripts.get("start") or "").strip()
+        evidence: list[str] = ["package.json detected."]
+        warnings: list[str] = []
+
+        backend_dependencies = {"express", "fastify", "koa", "hapi", "@nestjs/core"}
+        ssr_dependencies = {"next", "nuxt"}
+        static_dependencies = {
+            "vite",
+            "@vitejs/plugin-react",
+            "react-scripts",
+            "@angular/cli",
+            "@vue/cli-service",
+            "@sveltejs/vite-plugin-svelte",
+        }
+        static_build_markers = ("vite build", "react-scripts build", "ng build", "vue-cli-service build")
+        dev_start_markers = ("vite", "vite --", "react-scripts start", "ng serve", "vue-cli-service serve")
+
+        has_static_marker = bool(static_dependencies.intersection(dependencies)) or any(marker in build_script for marker in static_build_markers)
+        has_backend_marker = bool(backend_dependencies.intersection(dependencies))
+        has_ssr_marker = bool(ssr_dependencies.intersection(dependencies))
+        start_looks_dev_only = bool(start_script) and any(start_script == marker or start_script.startswith(f"{marker} ") for marker in dev_start_markers)
+
+        if has_static_marker and not has_backend_marker and not has_ssr_marker:
+            evidence.append("Static frontend dependency/build marker detected.")
+            if start_looks_dev_only:
+                evidence.append(f"package.json start script looks development-only: {start_script}")
+            return BuildPlan(
+                runtime_mode="static",
+                build_command=build_script or "npm run build",
+                output_dir=cls._detect_node_static_output_dir(package, app_dir),
+                build_env={
+                    "BP_NODE_RUN_SCRIPTS": "build",
+                    "BP_WEB_SERVER": "nginx",
+                    "BP_WEB_SERVER_ROOT": cls._detect_node_static_output_dir(package, app_dir),
+                    "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
+                },
+                confidence="high",
+                evidence=evidence,
+            )
+
+        if has_ssr_marker:
+            evidence.append("SSR Node framework detected.")
+            if not start_script:
+                warnings.append("No package.json start script found for SSR framework; Buildpacks may require a production start command.")
+            return BuildPlan(
+                runtime_mode="server",
+                build_command=build_script,
+                start_command=start_script,
+                confidence="high" if start_script else "medium",
+                evidence=evidence,
+                warnings=warnings,
+            )
+
+        if has_backend_marker or start_script:
+            evidence.append("Node server dependency or start script detected.")
+            if start_looks_dev_only:
+                warnings.append(f"Start script appears development-only: {start_script}. Configure a production start command if deployment fails.")
+            return BuildPlan(
+                runtime_mode="server" if component_type == "backend" else "worker",
+                build_command=build_script,
+                start_command=start_script,
+                confidence="high" if has_backend_marker and start_script else "medium",
+                evidence=evidence,
+                warnings=warnings,
+            )
+
+        warnings.append("Node package has no recognized static build or production start command.")
+        return BuildPlan(
+            runtime_mode="worker",
+            build_command=build_script,
+            confidence="low",
+            evidence=evidence,
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def _detect_node_static_output_dir(package_data: Dict[str, object], app_dir: Path) -> str:
+        scripts = package_data.get("scripts") if isinstance(package_data.get("scripts"), dict) else {}
+        build_script = str(scripts.get("build") or "") if isinstance(scripts, dict) else ""
+        if "react-scripts build" in build_script:
+            return "build"
+        if "ng build" in build_script:
+            project_name = str(package_data.get("name") or "").strip()
+            return f"dist/{project_name}" if project_name else "dist"
+        return "dist"
+
     @staticmethod
     def _infer_build_env(app_dir: Path) -> Dict[str, str]:
         env: Dict[str, str] = {}
-        package_json = app_dir / "package.json"
-        if package_json.exists():
-            try:
-                package_data = json.loads(package_json.read_text())
-            except (OSError, json.JSONDecodeError):
-                package_data = {}
-
-            scripts = package_data.get("scripts", {})
-            dependencies = package_data.get("dependencies", {})
-            dev_dependencies = package_data.get("devDependencies", {})
-            build_script = scripts.get("build")
-            has_build = isinstance(build_script, str) and build_script.strip() != ""
-            combined_dependencies = {**dependencies, **dev_dependencies}
-            backend_dependencies = {"express", "fastify", "koa", "hapi", "@nestjs/core", "next", "nuxt"}
-            static_frontend_build_markers = (
-                "vite build",
-                "react-scripts build",
-                "ng build",
-                "vue-cli-service build",
-                "svelte-kit sync",
-            )
-            is_static_frontend = (
-                has_build
-                and not backend_dependencies.intersection(combined_dependencies)
-                and (
-                    "vite" in combined_dependencies
-                    or "@vitejs/plugin-react" in combined_dependencies
-                    or "react-scripts" in combined_dependencies
-                    or "@angular/cli" in combined_dependencies
-                    or "@vue/cli-service" in combined_dependencies
-                    or "@sveltejs/vite-plugin-svelte" in combined_dependencies
-                    or any(marker in str(build_script) for marker in static_frontend_build_markers)
-                )
-            )
-            if is_static_frontend:
-                env.update(
-                    {
-                        "BP_NODE_RUN_SCRIPTS": "build",
-                        "BP_WEB_SERVER": "nginx",
-                        "BP_WEB_SERVER_ROOT": "dist",
-                        "BP_WEB_SERVER_ENABLE_PUSH_STATE": "true",
-                    }
-                )
-
-        env.update(PlatformCore._infer_java_build_env(app_dir))
+        env.update(PlatformCore._detect_build_plan(app_dir, "backend").build_env)
         return env
 
     @staticmethod

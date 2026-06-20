@@ -959,8 +959,8 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     port: component.port,
     confidence: component.confidence === "high" ? "high" : component.confidence === "low" || component.port_confidence === "default" ? "low" : "medium",
     framework: component.framework || inferFramework(component),
-    buildCommand: component.type === "frontend" ? "npm run build" : "",
-    outputDirectory: component.type === "frontend" ? "dist" : "",
+    buildCommand: component.build_plan?.build_command || (component.type === "frontend" ? "npm run build" : ""),
+    outputDirectory: component.build_plan?.output_dir || (component.type === "frontend" ? "dist" : ""),
     env: component.env.filter((item) => item.required && !item.platform_managed).map((item) => ({ id: item.name, key: item.name, value: "", secret: item.secret, required: item.required, source: item.source, evidence: item.evidence })),
     instanceSize: "micro",
     monthlyEstimateUsd: component.type === "frontend" ? 9 : 18,
@@ -972,7 +972,10 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     })),
     automaticEnv: autoEnvForComponent(component),
     communicationEnv: [],
-    warnings: component.warnings || [],
+    warnings: [
+      ...(component.warnings || []),
+      ...(component.build_plan?.runtime_mode ? [`Build plan: ${component.build_plan.runtime_mode} (${component.build_plan.confidence || "medium"} confidence).`] : []),
+    ],
   };
 }
 
