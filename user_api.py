@@ -822,6 +822,7 @@ def _deploy_component(
         app_path=component.path,
         port=component.port or payload.port,
         node_arch=payload.node_arch,
+        component_type=component.type,
         service_requirements=service_requirements,
         public=bool(defaults.get("deploy_public", component.public)),
         redeploy_backing_services=bool(payload.redeploy_services or component.redeploy_services),

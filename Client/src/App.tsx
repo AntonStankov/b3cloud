@@ -972,6 +972,7 @@ function componentToService(component: AnalyzedComponent, result: AnalyzeResult)
     communicationEnv: [],
     warnings: [
       ...(component.warnings || []),
+      ...((component.build_plan?.blockers || []).map((blocker) => `Build blocker: ${blocker}`)),
       ...(component.build_plan?.runtime_mode ? [`Build plan: ${component.build_plan.runtime_mode} (${component.build_plan.confidence || "medium"} confidence).`] : []),
     ],
   };

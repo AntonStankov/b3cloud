@@ -34,6 +34,7 @@ export interface BuildPlan {
   confidence: "high" | "medium" | "low" | string;
   evidence: string[];
   warnings: string[];
+  blockers?: string[];
 }
 
 export interface AnalyzedComponent {

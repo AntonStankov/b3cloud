@@ -86,6 +86,7 @@ class BuildPlan:
     confidence: str = "medium"
     evidence: list[str] = None
     warnings: list[str] = None
+    blockers: list[str] = None
 
     def __post_init__(self) -> None:
         if self.build_env is None:
@@ -94,6 +95,8 @@ class BuildPlan:
             self.evidence = []
         if self.warnings is None:
             self.warnings = []
+        if self.blockers is None:
+            self.blockers = []
 
 
 @dataclass
@@ -144,6 +147,7 @@ class DeploymentRequest:
     app_path: str = "."
     port: int = 8080
     node_arch: Optional[str] = None  # "amd64" (CPX) or "arm64" (CAX)
+    component_type: str = "backend"
     service_requirements: Optional[list[ServiceRequirement]] = None
     public: bool = True
     redeploy_backing_services: bool = False
@@ -668,7 +672,8 @@ class PlatformCore:
             if req.app_path == ".":
                 app_dir = self._detect_app_path(repo_dir)
             self._emit_status(status_callback, f"Using app path: {app_dir}.")
-            build_plan = self._detect_build_plan(app_dir, "backend")
+            build_plan = self._detect_build_plan(app_dir, req.component_type)
+            blockers = self._build_preflight_blockers(app_dir, build_plan)
             self._emit_status(
                 status_callback,
                 "Build plan: "
@@ -680,10 +685,21 @@ class PlatformCore:
             )
             for warning in build_plan.warnings:
                 self._emit_status(status_callback, f"Build plan warning: {warning}")
+            for blocker in [*build_plan.blockers, *blockers]:
+                self._emit_status(status_callback, f"Build preflight blocker: {blocker}")
+            if build_plan.blockers or blockers:
+                raise ValueError(
+                    "Build preflight failed for "
+                    f"{req.app_name} ({req.app_path}): "
+                    + " ".join([*build_plan.blockers, *blockers])
+                )
             if build_plan.runtime_mode == "dockerfile":
                 self._emit_status(status_callback, f"Running Dockerfile publish to {output_image}.")
-                self._run_command(["docker", "build", "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
-                self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
+                try:
+                    self._run_command(["docker", "build", "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
+                    self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
+                except RuntimeError as exc:
+                    raise RuntimeError(self._friendly_build_failure(str(exc), build_plan, app_dir)) from exc
                 self._emit_status(status_callback, f"Image published: {output_image}.")
                 return output_image
             app_dir = self._prepare_nested_python_component_context(app_dir, status_callback=status_callback)
@@ -720,13 +736,16 @@ class PlatformCore:
                 self._run_command(cmd, env=env, stream_callback=status_callback)
             except RuntimeError as exc:
                 if not self._is_disk_space_error(str(exc)):
-                    raise
+                    raise RuntimeError(self._friendly_build_failure(str(exc), build_plan, app_dir)) from exc
                 self._emit_status(
                     status_callback,
                     "Build host disk is full while running Buildpacks. Cleaning stale Docker/pack build cache and retrying once.",
                 )
                 self._cleanup_build_host(env=env, status_callback=status_callback)
-                self._run_command(cmd, env=env, stream_callback=status_callback)
+                try:
+                    self._run_command(cmd, env=env, stream_callback=status_callback)
+                except RuntimeError as retry_exc:
+                    raise RuntimeError(self._friendly_build_failure(str(retry_exc), build_plan, app_dir)) from retry_exc
             self._emit_status(status_callback, f"Image published: {output_image}.")
 
         return output_image
@@ -753,6 +772,43 @@ class PlatformCore:
     def _is_disk_space_error(message: str) -> bool:
         lowered = message.lower()
         return "no space left on device" in lowered or "disk quota exceeded" in lowered
+
+    @staticmethod
+    def _friendly_build_failure(message: str, build_plan: BuildPlan, app_dir: Path) -> str:
+        lowered = message.lower()
+        prefix = f"Build failed ({build_plan.runtime_mode}, {build_plan.confidence} confidence). "
+        if "could not find app in /workspace" in lowered or "no default process" in lowered:
+            return prefix + "No launch process was detected. Add a production start command, Procfile, or framework entrypoint."
+        if "npm install" in lowered or "npm ci" in lowered or "npm-install" in lowered or "resolving installation process" in lowered:
+            return prefix + PlatformCore._node_failure_hint(app_dir, message)
+        if "maven-wrapper" in lowered or "mvnw" in lowered or "maven" in lowered:
+            return prefix + "Java/Maven build failed. Check that pom.xml is valid, the Maven wrapper is complete, and the project builds with tests skipped."
+        if "unable to calculate memory configuration" in lowered or "memory-calculator" in lowered:
+            return prefix + "The runtime memory limit is too low for the detected JVM process. Increase memory or reduce JVM thread/native memory settings."
+        if "composer" in lowered or "php" in lowered:
+            return prefix + "PHP/Composer build failed. Check composer.json, lockfile compatibility, required PHP extensions, and Laravel artisan availability."
+        if "requirements.txt" in lowered or "pip install" in lowered or "pyproject" in lowered:
+            return prefix + "Python dependency installation failed. Check requirements/pyproject syntax and native package build requirements."
+        if "dockerfile" in lowered or "docker build" in lowered:
+            return prefix + "Dockerfile build failed. Check COPY/ADD paths, base image availability, and build commands."
+        return prefix + message[:1600]
+
+    @staticmethod
+    def _node_failure_hint(app_dir: Path, raw_message: str) -> str:
+        package = PlatformCore._read_json_file(app_dir / "package.json")
+        package_manager = str(package.get("packageManager") or "").strip()
+        lockfiles = [name for name in ("package-lock.json", "pnpm-lock.yaml", "yarn.lock") if (app_dir / name).exists()]
+        context = []
+        if package_manager:
+            context.append(f"packageManager={package_manager}")
+        if lockfiles:
+            context.append("lockfiles=" + ", ".join(lockfiles))
+        detail = " ".join(context)
+        if "pnpm-lock.yaml" in lockfiles and not package_manager:
+            return "Node dependency installation failed. pnpm-lock.yaml exists but package.json has no packageManager; add packageManager for pnpm or use npm/package-lock.json."
+        if len(lockfiles) > 1 and not package_manager:
+            return "Node dependency installation failed. Multiple lockfiles exist without packageManager; keep one lockfile or set packageManager. " + detail
+        return "Node dependency installation failed. Check package.json, lockfile freshness, packageManager, and registry access. " + detail
 
     def _cleanup_build_host(
         self,
@@ -2033,7 +2089,11 @@ class PlatformCore:
             port, port_confidence, port_evidence = cls._detect_component_port(path, component_type)
             env_requirements = cls._detect_env_requirements(path)
             services = cls._detect_service_requirements(path) if component_type in {"backend", "worker"} else []
+            preflight_blockers = cls._build_preflight_blockers(path, build_plan)
+            build_plan.blockers = list(dict.fromkeys([*build_plan.blockers, *preflight_blockers]))
             warnings = [*metadata_warnings, *build_plan.warnings]
+            if build_plan.blockers:
+                warnings.extend(f"Build blocker: {blocker}" for blocker in build_plan.blockers)
             if port_confidence == "default":
                 warnings.append("No explicit port was found; using the platform default port 8080. Confirm this before deploying.")
             if component_type in {"backend", "worker"} and not services:
@@ -2537,6 +2597,138 @@ class PlatformCore:
             evidence=["No precise build plan could be inferred."],
             warnings=["Build plan confidence is low; Buildpacks will use default detection."],
         )
+
+    @classmethod
+    def _build_preflight_blockers(cls, app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        blockers: list[str] = []
+        blockers.extend(cls._node_preflight_blockers(app_dir, build_plan))
+        blockers.extend(cls._java_preflight_blockers(app_dir, build_plan))
+        blockers.extend(cls._python_preflight_blockers(app_dir, build_plan))
+        blockers.extend(cls._php_preflight_blockers(app_dir, build_plan))
+        blockers.extend(cls._go_preflight_blockers(app_dir, build_plan))
+        blockers.extend(cls._dockerfile_preflight_blockers(app_dir, build_plan))
+        if build_plan.confidence == "low" and build_plan.runtime_mode in {"unknown", "worker", "backend", "frontend"}:
+            blockers.append("No reliable build plan could be inferred from repository markers.")
+        return list(dict.fromkeys(blockers))
+
+    @staticmethod
+    def _node_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        package_json = app_dir / "package.json"
+        if not package_json.exists():
+            return []
+        if "package.json detected." not in build_plan.evidence:
+            return []
+        package = PlatformCore._read_json_file(package_json)
+        if not package:
+            return ["package.json is invalid JSON or could not be read."]
+
+        scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+        package_manager = str(package.get("packageManager") or "").strip().lower()
+        lockfiles = {
+            "npm": app_dir / "package-lock.json",
+            "pnpm": app_dir / "pnpm-lock.yaml",
+            "yarn": app_dir / "yarn.lock",
+        }
+        present_locks = [name for name, path in lockfiles.items() if path.exists()]
+        blockers: list[str] = []
+        if len(present_locks) > 1 and not package_manager:
+            blockers.append(
+                "Multiple JavaScript lockfiles were found without packageManager in package.json: "
+                + ", ".join(present_locks)
+                + ". Keep one lockfile or set packageManager."
+            )
+        if package_manager.startswith("pnpm") and not lockfiles["pnpm"].exists():
+            blockers.append("packageManager is pnpm but pnpm-lock.yaml is missing.")
+        if package_manager.startswith("yarn") and not lockfiles["yarn"].exists():
+            blockers.append("packageManager is yarn but yarn.lock is missing.")
+        if package_manager.startswith("npm") and not lockfiles["npm"].exists():
+            blockers.append("packageManager is npm but package-lock.json is missing.")
+
+        if build_plan.runtime_mode == "static":
+            build_script = str(scripts.get("build") or "")
+            if not build_script:
+                blockers.append("Static frontend was detected but package.json has no build script.")
+            output_dir = build_plan.output_dir or "dist"
+            if output_dir in {".", "/", ""} or output_dir.startswith(".."):
+                blockers.append(f"Static frontend output directory is unsafe: {output_dir}")
+        elif build_plan.runtime_mode == "server":
+            start_script = str(scripts.get("start") or "")
+            if not start_script and not (app_dir / "Procfile").exists():
+                blockers.append("Node server/SSR app has no start script or Procfile.")
+            if re.search(r"\b(vite|react-scripts start|ng serve|vue-cli-service serve)\b", start_script):
+                blockers.append(f"Node server start script appears development-only: {start_script}")
+        return blockers
+
+    @staticmethod
+    def _java_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        if not any((app_dir / name).exists() for name in ("pom.xml", "build.gradle", "build.gradle.kts")):
+            return []
+        blockers: list[str] = []
+        pom = app_dir / "pom.xml"
+        if pom.exists() and not (app_dir / "src").exists():
+            blockers.append("Java build file exists but src/ is missing.")
+        mvnw = app_dir / "mvnw"
+        properties = app_dir / ".mvn" / "wrapper" / "maven-wrapper.properties"
+        jar = app_dir / ".mvn" / "wrapper" / "maven-wrapper.jar"
+        if mvnw.exists() and properties.exists() and not jar.exists() and not PlatformCore._maven_wrapper_can_download_jar(properties):
+            blockers.append("Maven wrapper is incomplete and does not define wrapperUrl.")
+        return blockers
+
+    @staticmethod
+    def _python_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        if not any((app_dir / name).exists() for name in ("requirements.txt", "pyproject.toml", "Pipfile")):
+            return []
+        blockers: list[str] = []
+        if build_plan.runtime_mode == "server" and not (app_dir / "Procfile").exists():
+            corpus = "\n".join(
+                path.read_text(errors="ignore")[:64_000]
+                for path in (app_dir / "main.py", app_dir / "app.py", app_dir / "server.py")
+                if path.exists()
+            ).lower()
+            if not any(marker in corpus for marker in ("fastapi", "flask", "django", "uvicorn", "gunicorn")):
+                blockers.append("Python server was detected but no Procfile or supported web entrypoint was found.")
+        return blockers
+
+    @staticmethod
+    def _php_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        if not (app_dir / "composer.json").exists():
+            return []
+        composer = PlatformCore._read_json_file(app_dir / "composer.json")
+        requires = composer.get("require", {}) if isinstance(composer.get("require"), dict) else {}
+        if not requires:
+            return ["composer.json has no require section; PHP Buildpacks may not be able to install runtime dependencies."]
+        if "laravel/framework" in requires and not (app_dir / "artisan").exists():
+            return ["Laravel framework dependency exists but artisan is missing."]
+        return []
+
+    @staticmethod
+    def _go_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        if not (app_dir / "go.mod").exists():
+            return []
+        if not any(app_dir.glob("*.go")) and not (app_dir / "cmd").exists():
+            return ["go.mod exists but no root Go files or cmd/ directory were found."]
+        return []
+
+    @staticmethod
+    def _dockerfile_preflight_blockers(app_dir: Path, build_plan: BuildPlan) -> list[str]:
+        if build_plan.runtime_mode != "dockerfile":
+            return []
+        blockers = []
+        missing_sources = PlatformCore._dockerfile_missing_copy_sources(app_dir)
+        if missing_sources:
+            blockers.append(
+                "Dockerfile references missing build-context files: "
+                + ", ".join(missing_sources[:8])
+                + ("." if len(missing_sources) <= 8 else ", ...")
+            )
+        dockerfile = app_dir / "Dockerfile"
+        try:
+            content = dockerfile.read_text(errors="ignore")
+        except OSError:
+            return ["Dockerfile could not be read."]
+        if not re.search(r"(?im)^\s*(CMD|ENTRYPOINT)\b", content):
+            blockers.append("Dockerfile has no CMD or ENTRYPOINT.")
+        return blockers
 
     @staticmethod
     def _dockerfile_missing_copy_sources(app_dir: Path) -> list[str]:
