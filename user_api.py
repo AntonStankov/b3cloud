@@ -848,9 +848,9 @@ def _deploy_component(
 
 def _deploy_parallelism(component_count: int) -> int:
     try:
-        configured = int(os.getenv("B3CLOUD_MAX_PARALLEL_COMPONENT_BUILDS", "2"))
+        configured = int(os.getenv("B3CLOUD_MAX_PARALLEL_COMPONENT_BUILDS", "1"))
     except ValueError:
-        configured = 2
+        configured = 1
     return max(1, min(component_count, configured))
 
 

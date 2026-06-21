@@ -707,6 +707,7 @@ class PlatformCore:
             self._prepare_maven_wrapper(app_dir, status_callback=status_callback)
             self._prepare_java_start_command(app_dir, status_callback=status_callback)
             self._prepare_php_start_command(app_dir, status_callback=status_callback)
+            self._prepare_node_start_command(app_dir, build_plan, status_callback=status_callback)
 
             cmd = [
                 "pack",
@@ -862,6 +863,8 @@ class PlatformCore:
         prefix = f"Build failed ({build_plan.runtime_mode}, {build_plan.confidence} confidence). "
         if "could not find app in /workspace" in lowered or "no default process" in lowered:
             return prefix + "No launch process was detected. Add a production start command, Procfile, or framework entrypoint."
+        if "executing lifecycle: failed with status code: 51" in lowered and "======== results ========" in lowered and "npm error" not in lowered and "npm err!" not in lowered:
+            return prefix + "Buildpacks could not resolve a runnable process for this app. The platform will generate an explicit Procfile when package.json has a start script."
         if "npm install" in lowered or "npm ci" in lowered or "npm-install" in lowered or "resolving installation process" in lowered:
             return prefix + PlatformCore._node_failure_hint(app_dir, message)
         if "maven-wrapper" in lowered or "mvnw" in lowered or "maven" in lowered:
@@ -2935,10 +2938,12 @@ class PlatformCore:
             evidence.append("SSR Node framework detected.")
             if not start_script:
                 warnings.append("No package.json start script found for SSR framework; Buildpacks may require a production start command.")
+            build_env = {"BP_NODE_RUN_SCRIPTS": "build"} if build_script else {}
             return BuildPlan(
                 runtime_mode="server",
                 build_command=build_script,
                 start_command=start_script,
+                build_env=build_env,
                 confidence="high" if start_script else "medium",
                 evidence=evidence,
                 warnings=warnings,
@@ -2948,10 +2953,12 @@ class PlatformCore:
             evidence.append("Node server dependency or start script detected.")
             if start_looks_dev_only:
                 warnings.append(f"Start script appears development-only: {start_script}. Configure a production start command if deployment fails.")
+            build_env = {"BP_NODE_RUN_SCRIPTS": "build"} if build_script else {}
             return BuildPlan(
                 runtime_mode="server" if component_type == "backend" else "worker",
                 build_command=build_script,
                 start_command=start_script,
+                build_env=build_env,
                 confidence="high" if has_backend_marker and start_script else "medium",
                 evidence=evidence,
                 warnings=warnings,
@@ -3167,6 +3174,37 @@ class PlatformCore:
             "Detected Vite frontend build with TypeScript precheck; using 'vite build' for deployment.",
         )
 
+    @staticmethod
+    def _prepare_node_start_command(
+        app_dir: Path,
+        build_plan: BuildPlan,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        if build_plan.runtime_mode not in {"server", "worker"}:
+            return
+        procfile = app_dir / "Procfile"
+        package_json = app_dir / "package.json"
+        if procfile.exists() or not package_json.exists():
+            return
+        package = PlatformCore._read_json_file(package_json)
+        scripts = package.get("scripts", {}) if isinstance(package.get("scripts"), dict) else {}
+        if not str(scripts.get("start") or "").strip():
+            return
+        command = PlatformCore._node_package_manager_command(app_dir, package)
+        procfile.write_text(f"web: {command} start\n")
+        PlatformCore._emit_status(
+            status_callback,
+            f"Detected Node service start script; generated Procfile using '{command} start'.",
+        )
+
+    @staticmethod
+    def _node_package_manager_command(app_dir: Path, package: Dict[str, object]) -> str:
+        package_manager = str(package.get("packageManager") or "").strip().lower()
+        if package_manager.startswith("pnpm") or (app_dir / "pnpm-lock.yaml").exists():
+            return "pnpm"
+        if package_manager.startswith("yarn") or (app_dir / "yarn.lock").exists():
+            return "yarn"
+        return "npm"
 
     @staticmethod
     def _prepare_node_package_manager(
