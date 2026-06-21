@@ -696,7 +696,7 @@ class PlatformCore:
             if build_plan.runtime_mode == "dockerfile":
                 self._emit_status(status_callback, f"Running Dockerfile publish to {output_image}.")
                 try:
-                    self._run_command(["docker", "build", "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
+                    self._run_command(["docker", "build", "-t", output_image, str(app_dir)], env=self._docker_build_env(env), stream_callback=status_callback)
                     self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
                 except RuntimeError as exc:
                     raise RuntimeError(self._friendly_build_failure(str(exc), build_plan, app_dir)) from exc
@@ -822,12 +822,21 @@ class PlatformCore:
             "Static frontend uses pnpm/yarn; building with generated Dockerfile and NGINX runtime instead of Paketo npm buildpack.",
         )
         try:
-            self._run_command(["docker", "build", "-f", str(dockerfile), "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
+            self._run_command(["docker", "build", "-f", str(dockerfile), "-t", output_image, str(app_dir)], env=self._docker_build_env(env), stream_callback=status_callback)
             self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
         except RuntimeError as exc:
             raise RuntimeError(self._friendly_build_failure(str(exc), build_plan, app_dir)) from exc
         self._emit_status(status_callback, f"Image published: {output_image}.")
         return output_image
+
+    @staticmethod
+    def _docker_build_env(env: Dict[str, str]) -> Dict[str, str]:
+        build_env = env.copy()
+        # The API VM currently uses Docker without the buildx plugin. For
+        # server-side Dockerfile builds, force the classic builder so deploys do
+        # not fail before the Dockerfile is evaluated.
+        build_env["DOCKER_BUILDKIT"] = "0"
+        return build_env
 
     @staticmethod
     def _should_use_static_frontend_docker_build(app_dir: Path) -> bool:
@@ -863,6 +872,8 @@ class PlatformCore:
             return prefix + "PHP/Composer build failed. Check composer.json, lockfile compatibility, required PHP extensions, and Laravel artisan availability."
         if "requirements.txt" in lowered or "pip install" in lowered or "pyproject" in lowered:
             return prefix + "Python dependency installation failed. Check requirements/pyproject syntax and native package build requirements."
+        if "buildkit is enabled" in lowered and "buildx" in lowered:
+            return prefix + "Docker build host is misconfigured: BuildKit is enabled but the Docker buildx plugin is missing or broken."
         if "dockerfile" in lowered or "docker build" in lowered:
             return prefix + "Dockerfile build failed. Check COPY/ADD paths, base image availability, and build commands."
         return prefix + message[:1600]
