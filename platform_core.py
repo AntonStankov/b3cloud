@@ -2854,9 +2854,21 @@ class PlatformCore:
                 if source.startswith(("http://", "https://", "$")):
                     continue
                 source_path = app_dir / source
-                if not list(app_dir.glob(source)) and not source_path.exists():
+                if not source_path.exists() and not PlatformCore._dockerfile_source_glob_exists(app_dir, source):
                     missing.append(source)
         return list(dict.fromkeys(missing))
+
+    @staticmethod
+    def _dockerfile_source_glob_exists(app_dir: Path, source: str) -> bool:
+        if not source or source in {".", "./"}:
+            return True
+        try:
+            return any(app_dir.glob(source))
+        except (IndexError, ValueError, OSError):
+            # Dockerfile COPY/ADD accepts forms that pathlib glob does not.
+            # Treat unparsable glob patterns as non-blocking so analysis never
+            # crashes; the real Docker build will still validate them.
+            return True
 
     @classmethod
     def _detect_node_build_plan(cls, app_dir: Path, component_type: str, framework: str = "unknown") -> BuildPlan:
