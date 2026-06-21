@@ -726,6 +726,14 @@ class PlatformCore:
                 self._prepare_static_frontend_build(app_dir, status_callback=status_callback)
             self._prepare_node_package_manager(app_dir, status_callback=status_callback)
             self._prepare_node_lockfile(app_dir, status_callback=status_callback)
+            if build_plan.runtime_mode == "static" and self._should_use_static_frontend_docker_build(app_dir):
+                return self._build_static_frontend_with_docker(
+                    app_dir,
+                    output_image,
+                    build_plan,
+                    env,
+                    status_callback=status_callback,
+                )
             for key, value in inferred_build_env.items():
                 env[key] = value
                 cmd.extend(["--env", f"{key}={value}"])
@@ -769,6 +777,70 @@ class PlatformCore:
         self._run_command(["docker", "tag", "docker.io/library/alpine:3.20", bootstrap_tag], env=env)
         self._run_command(["docker", "push", bootstrap_tag], env=env)
         self._run_command(["docker", "rmi", bootstrap_tag], env=env)
+
+    def _build_static_frontend_with_docker(
+        self,
+        app_dir: Path,
+        output_image: str,
+        build_plan: BuildPlan,
+        env: Dict[str, str],
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        output_dir = (build_plan.output_dir or "dist").strip().strip("/")
+        if not output_dir or output_dir.startswith("..") or re.search(r"(^|/)\.\.(/|$)", output_dir):
+            raise ValueError(f"Unsafe static frontend output directory: {build_plan.output_dir}")
+
+        dockerfile = app_dir / ".b3cloud.static.Dockerfile"
+        dockerfile.write_text(
+            "\n".join(
+                [
+                    "FROM docker.io/library/node:24-bookworm-slim AS build",
+                    "WORKDIR /app",
+                    "COPY . .",
+                    "ENV CI=true",
+                    "RUN corepack enable",
+                    "RUN set -eux; \\",
+                    "    if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; \\",
+                    "    elif [ -f yarn.lock ]; then yarn install --frozen-lockfile; \\",
+                    "    elif [ -f package-lock.json ]; then npm ci; \\",
+                    "    else npm install; fi",
+                    "RUN set -eux; \\",
+                    "    if [ -f pnpm-lock.yaml ]; then pnpm run build; \\",
+                    "    elif [ -f yarn.lock ]; then yarn run build; \\",
+                    "    else npm run build; fi",
+                    "FROM docker.io/library/nginx:1.27-alpine",
+                    "RUN printf '%s\\n' 'server {' '  listen 8080;' '  server_name _;' '  root /usr/share/nginx/html;' '  index index.html;' '  location / {' '    try_files $uri $uri/ /index.html;' '  }' '}' > /etc/nginx/conf.d/default.conf",
+                    f"COPY --from=build /app/{output_dir} /usr/share/nginx/html",
+                    "EXPOSE 8080",
+                    "",
+                ]
+            )
+        )
+
+        self._emit_status(
+            status_callback,
+            "Static frontend uses pnpm/yarn; building with generated Dockerfile and NGINX runtime instead of Paketo npm buildpack.",
+        )
+        try:
+            self._run_command(["docker", "build", "-f", str(dockerfile), "-t", output_image, str(app_dir)], env=env, stream_callback=status_callback)
+            self._run_command(["docker", "push", output_image], env=env, stream_callback=status_callback)
+        except RuntimeError as exc:
+            raise RuntimeError(self._friendly_build_failure(str(exc), build_plan, app_dir)) from exc
+        self._emit_status(status_callback, f"Image published: {output_image}.")
+        return output_image
+
+    @staticmethod
+    def _should_use_static_frontend_docker_build(app_dir: Path) -> bool:
+        package_json = app_dir / "package.json"
+        if not package_json.exists():
+            return False
+        package = PlatformCore._read_json_file(package_json)
+        package_manager = str(package.get("packageManager") or "").strip().lower()
+        return (
+            package_manager.startswith(("pnpm@", "yarn@"))
+            or (app_dir / "pnpm-lock.yaml").exists()
+            or (app_dir / "yarn.lock").exists()
+        )
 
     @staticmethod
     def _is_disk_space_error(message: str) -> bool:
@@ -2534,16 +2606,32 @@ class PlatformCore:
         framework: str = "unknown",
     ) -> BuildPlan:
         if (app_dir / "composer.json").exists() or (app_dir / "artisan").exists() or (app_dir / "public/index.php").exists():
-            warnings = []
             if (app_dir / "Dockerfile").exists():
-                warnings.append("Dockerfile detected. Current deployment uses Buildpacks, so Dockerfile instructions are not executed.")
+                missing_sources = cls._dockerfile_missing_copy_sources(app_dir)
+                blockers = []
+                if missing_sources:
+                    blockers.append(
+                        "Dockerfile references files that are missing from this component path: "
+                        + ", ".join(missing_sources[:8])
+                        + ("." if len(missing_sources) <= 8 else ", ...")
+                    )
+                return BuildPlan(
+                    runtime_mode="dockerfile",
+                    build_command="docker build",
+                    start_command="Dockerfile CMD/ENTRYPOINT",
+                    confidence="high" if not missing_sources else "low",
+                    evidence=["PHP project with Dockerfile detected; using Dockerfile because the current Paketo builder does not provide a PHP runtime."],
+                    warnings=["PHP Dockerfile detected; Dockerfile instructions will be used instead of Buildpacks."],
+                    blockers=blockers,
+                )
             return BuildPlan(
                 runtime_mode="server" if component_type == "backend" else "worker",
                 build_command="PHP/Composer buildpack default",
                 start_command="PHP buildpack default",
-                confidence="medium",
+                confidence="low",
                 evidence=["PHP Composer or web entrypoint detected."],
-                warnings=warnings,
+                warnings=["PHP project detected without Dockerfile. The current Paketo builder may not provide a PHP runtime."],
+                blockers=["PHP deployments require a Dockerfile with the current builder configuration."],
             )
         if (app_dir / "package.json").exists():
             return cls._detect_node_build_plan(app_dir, component_type, framework)
